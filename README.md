@@ -254,9 +254,10 @@
 3. `command = 2` → 期望 `state = 2`（OriginHold）。此时电机**还没使能**，标零只是读编码器。
 4. `catch_motor_enable = 1` → 下一拍 `catch_debug.motor_enabled` 应变成 1。
 5. `target_height_m = 0.01`，`command = 3` → 机构应向上走 10 mm，状态 11 → 12。
-6. **看方向**：`actual_height_m` 应该是 **+0.01**。
-   - 如果是 −0.01 或不动：`lift_encoder_sign` 取反，回第 2 步重来。
-   - 如果机构**向下冲**或剧烈抖动：`current_encoder_sign` 反了，立刻 `catch_motor_enable = 0`，取反后回第 2 步。
+6. **看方向**：`actual_height_m` 应该是 **+0.01**，且机构**实际往上走**。
+   - 机构往下走、但读数仍是 +0.01：`lift_encoder_sign` 取反，回第 2 步重来。
+     （这个错**不会报故障**——读数和命令用同一个符号，软件里是自洽的，只能靠眼睛看。）
+   - 一使能就朝一个方向猛冲、电流打满：`current_encoder_sign` 反了，立刻 `catch_motor_enable = 0`，取反后回第 2 步。
 
 > 方向验证这一步只要错一次就可能撞限位或飞车，务必先让机构悬空、行程留足余量。
 
