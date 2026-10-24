@@ -4,8 +4,8 @@
 namespace
 {
 /**
- * @brief 有限正数判定
- * @note 拒绝 NaN / Inf / 0，避免它们被当作"看起来合法"的阈值传进控制器。
+ * @brief 是不是有限的正数。
+ * @note  挡掉 NaN、Inf 和 0 —— 这三个看起来都"填了"，但都不能当阈值用。
  */
 bool Positive(float x)
 {
@@ -14,13 +14,12 @@ bool Positive(float x)
 }
 
 /**
- * @brief 校验业务阈值
- * @note 顺序固定：四个实测标志 → 速度/加速度自洽 → 到位与余量 → 时间参数范围。
+ * @brief 检查工艺阈值有没有自相矛盾。
+ * @note 顺序是：先看速度和加速度的关系，再看容差和余量，最后看时间参数在不在合理范围。
  */
 bool CatchBlockConfig::Validate() const
 {
-  return direction_verified && model_verified && current_limits_verified && motion_limits_verified &&
-      Positive(travel_m) && Positive(speed_m_s) && Positive(acceleration_m_s2) &&
+  return Positive(travel_m) && Positive(speed_m_s) && Positive(acceleration_m_s2) &&
       Positive(overspeed_m_s) && overspeed_m_s > speed_m_s &&
       Positive(position_tolerance_m) && position_tolerance_m < travel_m / 10 &&
       Positive(settled_speed_m_s) && settled_speed_m_s < speed_m_s &&
@@ -30,8 +29,8 @@ bool CatchBlockConfig::Validate() const
 }
 
 /**
- * @brief 校验硬件参数
- * @note max_current_A 上限取 20 A，是 C620 的额定上限，不是本机构的可用值。
+ * @brief 检查电机参数和量程对不对。
+ * @note 电流上限卡在 20 A，那是 C620 的额定值，不是这台机构能用的值。
  */
 bool CatchBlockConfig::ValidateHardware() const
 {

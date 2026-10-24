@@ -2,7 +2,7 @@
 #include "bsp_hardware.hpp"
 #include <cmath>
 
-// 三个硬件开关的定义（声明见头文件），上电全为 0：泵停、阀开、电机不输出。
+// 三个硬件开关的定义（声明在头文件）。上电全为 0：气泵不吸、夹爪松开、电机不输出。
 extern "C"
 {
 volatile uint8_t catch_pump_on = 0;
@@ -12,12 +12,12 @@ volatile uint8_t catch_motor_enable = 0;
 
 namespace
 {
-/// @brief 编码器 1 count 对应的转子角度：2π/8192 ≈ 7.67e-4 rad
+/// @brief 编码器 1 个计数对应多少弧度：2π/8192 ≈ 7.67e-4
 constexpr float RadPerCount = 6.28318530718f / 8192.0f;
 
 /**
- * @brief 有限正数判定
- * @note 换算系数可能因为参数写错变成 0 或 Inf，这里单独判一次。
+ * @brief 是不是有限的正数。
+ * @note 换算系数可能因为参数写错变成 0 或 Inf，这里单独挡一次。
  */
 bool Positive(float x)
 {
@@ -26,8 +26,8 @@ bool Positive(float x)
 }
 
 /**
- * @brief 初始化 CAN、反馈守卫与 ADRC 位置环
- * @note 失败路径都不改 configured_，由返回值区分"拒绝"与"硬件故障"。
+ * @brief 按参数把 CAN、反馈守卫、位置环配好。
+ * @note 失败的两种情况都不改 configured_，靠返回值区分"拒绝"和"硬件故障"。
  */
 CatchBlockDriver::ConfigResult CatchBlockDriver::Configure(const CatchBlockConfig &config)
 {
@@ -88,8 +88,8 @@ CatchBlockDriver::ConfigResult CatchBlockDriver::Configure(const CatchBlockConfi
 }
 
 /**
- * @brief 以当前静止位置为零点并设软限位
- * @note 软限位 = [原点, 顶端] 两端各留 travel_fault_margin_m；它挡不住失电下坠。
+ * @brief 把现在的位置记成 0 m，并按行程划出软限位。
+ * @note 软限位挡不住失电下坠，只是让控制器别去撞两端。
  */
 bool CatchBlockDriver::ArmAtCurrentPosition()
 {
@@ -116,6 +116,10 @@ bool CatchBlockDriver::ArmAtCurrentPosition()
   return true;
 }
 
+/**
+ * @brief 丢掉"已配置"和零点标记，回到不能动的状态
+ * @note 不清故障码，那个由 ResetFault() 单独负责。
+ */
 void CatchBlockDriver::ResetConfiguration()
 {
   configured_ = false;
@@ -123,8 +127,8 @@ void CatchBlockDriver::ResetConfiguration()
 }
 
 /**
- * @brief 刷新所有公有采样量与诊断量
- * @note 高度/速度只在"已配置 + 已标零 + 反馈有效"三个条件同时成立时更新，否则保留旧值。
+ * @brief 把编码器、电流、温度读进公有成员。
+ * @note 高度和速度要"已配置 + 已标零 + 反馈有效"三条都成立才更新，否则保留旧值。
  */
 void CatchBlockDriver::Sample()
 {
@@ -158,8 +162,8 @@ void CatchBlockDriver::Sample()
 }
 
 /**
- * @brief 米 → 转子目标角
- * @note 唯一的高度下发入口，零点与行程范围都在这里把关。
+ * @brief 把"多少米"换成转子目标角下发。
+ * @note 全工程只有这一个高度下发入口，零点和行程范围都在这里把关。
  */
 bool CatchBlockDriver::SetHeightTarget(float metres)
 {
@@ -183,8 +187,8 @@ bool CatchBlockDriver::SetHeightTarget(float metres)
 }
 
 /**
- * @brief 两路继电器跟随标志位，并在 catch_motor_enable 为 0 时撤力
- * @note 继电器写在最前面，不受任何使能条件影响，便于单独做硬件通断测试。
+ * @brief 把两个继电器开关写到引脚，顺带看总开关、为 0 就撤力。
+ * @note 继电器先写，不受任何使能条件影响，方便单独测硬件通断。
  */
 bool CatchBlockDriver::ApplyManualOverrides()
 {

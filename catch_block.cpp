@@ -2,14 +2,14 @@
 #include "bsp_dwt.hpp"
 #include <cmath>
 
-// 全局唯一的调试窗口实例。上电全 0：泵停、阀开、电机不输出、无待执行命令。
+// 全局唯一的调试窗口实例。上电全 0：气泵不吸、夹爪松开、电机不输出、没有待执行命令。
 CatchBlockDebug catch_debug;
 
 namespace
 {
 /**
  * @brief 关中断的短临界区
- * @note 退出时恢复进入前的中断掩码，不做成"无条件开中断"。
+ * @note 退出时恢复进入前的掩码，不做成"无条件开中断"。
  */
 class Critical
 {
@@ -32,6 +32,8 @@ private:
 }
 
 /** @name 命令入口 */
+// 这 12 个方法都只做一件事：换个命令码塞进邮箱就返回。
+// 判断状态、动硬件全在下一拍 Update() → Process() 里，所以这里看不到任何逻辑。
 /** @{ */
 bool CatchBlock::Configure(const Config &config)
 {
@@ -78,14 +80,43 @@ bool CatchBlock::MoveToHeight(float height_m)
   return Enqueue(Command::MoveToHeight, height_m);
 }
 
+bool CatchBlock::LiftToTop()
+{
+  return Enqueue(Command::LiftToTop);
+}
+
+bool CatchBlock::DescendToOrigin()
+{
+  return Enqueue(Command::DescendToOrigin);
+}
+
 bool CatchBlock::HoldHere()
 {
   return Enqueue(Command::HoldHere);
 }
 /** @} */
 
+/** @name 单步动作 */
+/** @{ */
+/**
+ * @brief 两路继电器的单步动作
+ * @note 只改标志位，真正写引脚在 ApplyManualOverrides()，所以最多晚一拍（≤4 ms）。
+ */
+void CatchBlock::SetPump(bool on)
+{
+  catch_pump_on = on ? 1 : 0;
+}
+
+void CatchBlock::SetValve(bool on)
+{
+  catch_valve_closed = on ? 1 : 0;
+}
+/** @} */
+
 /** @name 邮箱 */
 /** @{ */
+// 三个重载是同一个邮箱的三种载荷。关键约定：命令码最后写，
+// 保证取命令时载荷一定已经就绪；取命令的一方先拷走载荷再清标志。
 bool CatchBlock::Enqueue(Command command)
 {
   Critical guard;
@@ -122,8 +153,8 @@ bool CatchBlock::Enqueue(Command command, const Config &config)
 }
 
 /**
- * @brief 从邮箱取一条命令
- * @note 临界区里只做"拷走并清标志"，Process() 在临界区外执行，避免长时间关中断。
+ * @brief 从邮箱取一条命令交给 Process()
+ * @note 临界区里只做"拷走载荷 + 清标志"，Process() 放到临界区外，避免长时间关中断。
  */
 void CatchBlock::ConsumeRequest(uint32_t now_ms)
 {
@@ -148,8 +179,9 @@ void CatchBlock::ConsumeRequest(uint32_t now_ms)
 }
 
 /**
- * @brief 读取一条 Keil 命令
- * @note 先清命令号保证只生效一次，再走与公开命令完全相同的 Process() 路径。
+ * @brief 从邮箱取一条 Keil 窗口写的命令
+ * @note 先把命令号清 0 保证只生效一次，再走与公开命令完全相同的 Process()。
+ *       7~10 是继电器直出，不经过 Process，所以这里要提前把上一条的拒绝原因清掉。
  */
 void CatchBlock::ConsumeDebugCommand(uint32_t now_ms)
 {
@@ -159,6 +191,7 @@ void CatchBlock::ConsumeDebugCommand(uint32_t now_ms)
     return;
   }
   catch_debug.command = 0;
+  last_reject_ = ReasonNone; // 7~10 不走 Process，不先清就会读到上一条的原因
 
   Command command = Command::None;
   Config config;
@@ -185,6 +218,40 @@ void CatchBlock::ConsumeDebugCommand(uint32_t now_ms)
     case 6: // 软急停：冻结动作并锁在当前位置，比直接撤力安全
       command = Command::SoftStop;
       break;
+    case 7: // 单步：气泵开（PE12 高），硬件直出，不看状态与配置
+      SetPump(true);
+      catch_debug.result = 1;
+      return;
+    case 8: // 单步：气泵关（松开吸附）
+      SetPump(false);
+      catch_debug.result = 1;
+      return;
+    case 9: // 单步：电磁阀开（PE6 高 = 夹爪闭合）
+      SetValve(true);
+      catch_debug.result = 1;
+      return;
+    case 10: // 单步：电磁阀关（夹爪松开）
+      SetValve(false);
+      catch_debug.result = 1;
+      return;
+    case 11: // 单步：抬升到行程顶端（需已配置 + 已标零 + 已使能）
+      command = Command::LiftToTop;
+      break;
+    case 12: // 单步：下降到原点（需已配置 + 已标零 + 已使能）
+      command = Command::DescendToOrigin;
+      break;
+    case 13: // 自动流程：原点稳定后进入夹取（此时应已开阀、开泵）
+      command = Command::CloseGrip;
+      break;
+    case 14: // 自动流程：人工确认夹牢，上升到行程顶端
+      command = Command::ConfirmGripAndLift;
+      break;
+    case 15: // 自动流程：人工许可投放，下一拍复核后进入 Release
+      command = Command::PermitDrop;
+      break;
+    case 16: // 自动流程：人工确认物块已离开，受控下降回原点
+      command = Command::ConfirmObjectClearAndReturn;
+      break;
     default:
       catch_debug.result = 2; // 未知命令号，直接记"被拒绝"
       return;
@@ -200,21 +267,24 @@ void CatchBlock::ConsumeDebugCommand(uint32_t now_ms)
 
 /** @name 框架回调 */
 /** @{ */
+/**
+ * @brief 框架启动时调一次，重复注册不会重置正在跑的状态
+ * @note PE6/PE12 的上电电平由 CubeMX 初始化，本应用在这里不写引脚。
+ */
 void CatchBlock::Start()
 {
-  // 重复注册不重置运行中的状态，也不动阀门。
   if (started_)
   {
     return;
   }
   started_ = true;
-  Publish(); // PE6/PE12 的上电电平由 CubeMX 初始化，本应用此处不写。
+  Publish();
 }
 
 /**
- * @brief 框架 App 任务入口（名义 5 ms）
- * @note 顺序固定：先撤力与采样，再查故障，最后收命令、推状态、写输出。
- *       采样必须早于 CheckMotion，否则检查会用上一拍的数据。
+ * @brief 框架 App 任务入口（4 ms 一拍，250 Hz）
+ * @note 顺序不能乱：先撤力与采样，再查故障，最后收命令、推状态、写输出。
+ *       采样必须早于 CheckMotion，否则检查用的是上一拍的数据。
  */
 void CatchBlock::Update()
 {
@@ -228,7 +298,7 @@ void CatchBlock::Update()
     now_us = DWT_GetTimeline_USec();
   }
   const uint32_t now_ms = uint32_t(now_us / 1000);
-  // 首拍没有上一拍时间，按名义 5 ms 处理。
+  // 首拍没有上一拍时间，用 5 ms 占位；只影响 2~15 ms 的窗口判断，不影响控制。
   const uint64_t elapsed_us = previous_tick_us_ && now_us >= previous_tick_us_ ?
       now_us - previous_tick_us_ : 5000;
 
@@ -253,12 +323,14 @@ void CatchBlock::Update()
 /** @name 状态机 */
 /** @{ */
 /**
- * @brief 命令分发
- * @note 每个 case 自己判断"当前状态 + 物理条件"，不满足就落到末尾计一次拒绝。
- *       人工确认已经写进命令名里，所以这里不再逐条检查确认位。
+ * @brief 主分发：拿到一条命令，决定转状态还是记一次拒绝
+ * @note 调用者只有两个：ConsumeRequest()（业务代码下的命令）和 ConsumeDebugCommand()（Keil 写的命令）。
+ *       每个 case 自己判断"当前状态 + 物理条件"，不满足就 break 落到末尾统一计一次拒绝。
+ *       人工确认已经写进命令名里了，这里不再逐条检查确认位。
  */
 void CatchBlock::Process(Command command, const Config &config, float height_m, uint32_t now_ms)
 {
+  last_reject_ = ReasonNone; // 每条命令重新记原因，避免读到上一条的
   switch (command)
   {
     case Command::Configure:
@@ -317,11 +389,31 @@ void CatchBlock::Process(Command command, const Config &config, float height_m, 
       }
       Fail(OperatorHold, true, now_ms);
       return;
-    case Command::MoveToHeight: // 调试位移：只允许从原点/手动保持出发
-      if ((state_ != State::OriginHold && state_ != State::ManualHold) ||
-          !driver_.Enabled() || !driver_.Healthy() || !std::isfinite(height_m) ||
-          height_m < 0 || height_m > driver_.TravelMetres())
+    case Command::MoveToHeight:    // 调试位移：目标由操作员给
+    case Command::LiftToTop:       // 抬升：目标取行程顶端
+    case Command::DescendToOrigin: // 下降：目标取原点
+      // 三条命令共用同一条运动路径，只有目标来源不同；顶端/原点在此取值，保证用的是生效参数。
+      if (command == Command::LiftToTop)
       {
+        height_m = driver_.TravelMetres();
+      }
+      else if (command == Command::DescendToOrigin)
+      {
+        height_m = 0;
+      }
+      if (state_ != State::OriginHold && state_ != State::ManualHold)
+      {
+        Reject(ReasonState); // 只能从原点保持或手动保持出发
+        break;
+      }
+      if (!driver_.Enabled() || !driver_.Healthy())
+      {
+        Reject(ReasonNotReady); // 最常见：catch_motor_enable 还没置 1
+        break;
+      }
+      if (!std::isfinite(height_m) || height_m < 0 || height_m > driver_.TravelMetres())
+      {
+        Reject(ReasonTarget); // 含 NaN / Inf，以及超出 0..travel_m
         break;
       }
       if (!ApplyHeight(height_m, now_ms))
@@ -354,23 +446,52 @@ void CatchBlock::Process(Command command, const Config &config, float height_m, 
     default:
       break;
   }
+  // 走到这里说明没有一条 case 提前 return，本次命令被拒。
+  // 具体原因由各 case 自己写；没写的一律归为"当前状态不接受"。
+  if (last_reject_ == ReasonNone)
+  {
+    last_reject_ = ReasonState;
+  }
   ++rejected_; // 入队成功不等于转换获准，这里统计被拒次数。
 }
 
 /**
- * @brief 下发参数并初始化驱动
- * @note 前置条件：电机已停、业务阈值与硬件参数都合法；配置成功后必须重新标零。
+ * @brief 记一次拒绝原因
+ * @note 只记录，不计数；计数统一在 Process() 末尾，避免"先记原因再 break"的路径被算两次。
+ */
+void CatchBlock::Reject(uint8_t reason)
+{
+  last_reject_ = reason;
+}
+
+/**
+ * @brief 配置：先查三类参数，再让驱动初始化
+ * @note 前置条件：电机已停、阈值与硬件参数都合法。配好后必须重新标零。
  */
 bool CatchBlock::ApplyConfigure(const Config &config, uint32_t now_ms)
 {
-  if (driver_.Enabled() || !config.Validate() || !config.ValidateHardware())
+  // 三类拒绝原因分开报：它们对应的处理动作完全不同，共用一个 result=2 排查起来很费劲。
+  if (driver_.Enabled())
   {
+    Reject(ReasonEnabled); // 反过来：这里是"还在输出"，要先撤力，不是"没使能"
+    return false;
+  }
+  if (!config.Validate())
+  {
+    Reject(ReasonThreshold);
+    return false;
+  }
+  if (!config.ValidateHardware())
+  {
+    Reject(ReasonHardware);
     return false;
   }
 
   const CatchBlockDriver::ConfigResult result = driver_.Configure(config);
   if (result == CatchBlockDriver::ConfigResult::Rejected)
   {
+    // 驱动侧拒绝：换 ESC 编号、GPIO 无效、换算系数为 0 或 Inf。
+    Reject(ReasonHardware);
     return false;
   }
 
@@ -388,13 +509,19 @@ bool CatchBlock::ApplyConfigure(const Config &config, uint32_t now_ms)
 }
 
 /**
- * @brief 在有支承的静止原点采样零点并设软限位
- * @note 是否使能由 catch_motor_enable 决定，标零本身不会让机构动。
+ * @brief 在静止的原点采零点、设软限位
+ * @note 标零本身不会让机构动，动不动由 catch_motor_enable 决定。
  */
 bool CatchBlock::DoArmAtOrigin(uint32_t now_ms)
 {
-  if (state_ != State::Idle || !driver_.ArmAtCurrentPosition())
+  if (state_ != State::Idle)
   {
+    Reject(ReasonState); // 必须先配置成功（state=Idle）才能标零
+    return false;
+  }
+  if (!driver_.ArmAtCurrentPosition())
+  {
+    Reject(ReasonNotReady); // 反馈不健康，或机构还在动（速度超门限）
     return false;
   }
 
@@ -410,8 +537,8 @@ bool CatchBlock::DoArmAtOrigin(uint32_t now_ms)
 }
 
 /**
- * @brief 切状态并复位本阶段计时
- * @note 同时清掉"到位计时"，避免沿用上一阶段的判断。
+ * @brief 换状态，并把本阶段计时清零
+ * @note 顺手清掉"到位计时"，免得沿用上一阶段的判断。
  */
 void CatchBlock::Transition(State state, uint32_t now_ms)
 {
@@ -421,9 +548,9 @@ void CatchBlock::Transition(State state, uint32_t now_ms)
 }
 
 /**
- * @brief 锁存故障并选择"保持"还是"断驱动"
- * @note 还能闭环就锁在当前位置（FaultHold），否则断驱动（Fault）。两者都不保证托住负载。
- *       "能不能保持"是安全策略，只能在本层决定，不能下放给驱动层。
+ * @brief 记故障，并决定"托住"还是"撤驱动"
+ * @note can_hold=true 且驱动还能闭环 → FaultHold（锁在当前位置）；否则 Disable → Fault。
+ *       两者都不保证托住负载。"能不能保持"是安全策略，只能在本层决定，不能下放给驱动层。
  */
 void CatchBlock::Fail(uint32_t fault, bool can_hold, uint32_t now_ms)
 {
@@ -440,8 +567,8 @@ void CatchBlock::Fail(uint32_t fault, bool can_hold, uint32_t now_ms)
 }
 
 /**
- * @brief 自动推进与阶段超时
- * @note 每拍最多前进一个状态；超时检查放在最后，避免刚转换就被判超时。
+ * @brief 自动流程往前走一格，然后查阶段超时
+ * @note 每拍最多前进一格；超时检查放在最后，避免刚转换就被判超时。
  */
 void CatchBlock::Advance(uint64_t now_us, uint32_t now_ms)
 {
@@ -505,8 +632,8 @@ void CatchBlock::Advance(uint64_t now_us, uint32_t now_ms)
 /** @name 判据与检查 */
 /** @{ */
 /**
- * @brief 使能白名单
- * @note 除 Unconfigured / Idle / FaultHold / Fault 外，其余状态都允许电机输出。
+ * @brief 这个状态能不能让电机出力（白名单）
+ * @note 只有 Unconfigured / Idle / FaultHold / Fault 四个状态不在名单里。
  */
 bool CatchBlock::StateAllowsEnable() const
 {
@@ -519,8 +646,8 @@ bool CatchBlock::StateAllowsEnable() const
 }
 
 /**
- * @brief 到位判定
- * @note 使能中 + 位置误差够小 + 速度够小，并持续 settle_ms 才算成立。
+ * @brief 到位了没有：使能中 + 位置误差够小 + 速度够小，并且持续 settle_ms
+ * @note 三个条件任一不满足就清零重新计时，所以"抖一下"会重新开始算。
  */
 bool CatchBlock::Settled(float target_m, uint64_t now_us)
 {
@@ -538,8 +665,8 @@ bool CatchBlock::Settled(float target_m, uint64_t now_us)
 }
 
 /**
- * @brief 高度目标下发 + 失败上报
- * @note 与拆分前一致：所有失败一律记 Travel 故障，不区分"参数没配好"和"真的越界"。
+ * @brief 下发高度目标，失败就当 Travel 故障处理
+ * @note 失败一律记 Travel，不区分"参数没配好"和"真的越界"。
  */
 bool CatchBlock::ApplyHeight(float metres, uint32_t now_ms)
 {
@@ -552,8 +679,9 @@ bool CatchBlock::ApplyHeight(float metres, uint32_t now_ms)
 }
 
 /**
- * @brief 运行中检查
- * @note 只在驱动使能时进行：应用周期、CAN 发送结果、控制器健康、高度越界，任何一项异常都升级为故障。
+ * @brief 使能期间每拍体检
+ * @note 查四件事：应用周期、上次 CAN 发送、控制器/反馈健康、高度越界。任一项异常就升级为故障。
+ *       没使能时直接返回，因为没输出就没有这些风险。
  */
 void CatchBlock::CheckMotion(uint64_t now_us, uint32_t now_ms, uint64_t elapsed_us)
 {
@@ -561,7 +689,8 @@ void CatchBlock::CheckMotion(uint64_t now_us, uint32_t now_ms, uint64_t elapsed_
   {
     return;
   }
-  // 应用周期异常（名义 5 ms，允许 2~15 ms）；注意这里量的是 App 任务，不是控制环。
+  // 应用周期异常（实测 4 ms，允许 2~15 ms）；注意这里量的是 App 任务，不是控制环。
+  // 在 Keil 里下断点就会超过 15 ms，所以使能状态下单步调试必掉故障，见 README。
   if (now_us < previous_tick_us_ || elapsed_us < 2000 || elapsed_us > 15000)
   {
     Fail(Timing, false, now_ms);
@@ -592,8 +721,8 @@ void CatchBlock::CheckMotion(uint64_t now_us, uint32_t now_ms, uint64_t elapsed_
 /** @name 输出与调试窗口 */
 /** @{ */
 /**
- * @brief 输出层
- * @note 继电器与撤力交给驱动层；本层只决定"这个状态该不该使能"。
+ * @brief 写输出：继电器交给驱动层，本层只决定"这个状态该不该使能"
+ * @note 已经使能就不重复使能；状态不在白名单、控制器不健康、零点无效，都保持现状。
  */
 void CatchBlock::ApplyOutputs()
 {
@@ -602,7 +731,6 @@ void CatchBlock::ApplyOutputs()
   {
     return;
   }
-  // 已使能则不再重复使能；状态不在白名单或控制器不健康则保持现状。
   if (driver_.Enabled() || !driver_.Ready() || !driver_.OriginValid() ||
       !StateAllowsEnable() || !driver_.Healthy())
   {
@@ -621,7 +749,7 @@ void CatchBlock::ApplyOutputs()
 }
 
 /**
- * @brief 刷新调试窗口
+ * @brief 把驱动层的量搬进 catch_debug
  * @note 只写只读类字段，不动 catch_debug.config / command，避免覆盖操作员正在填的内容。
  */
 void CatchBlock::Publish()
@@ -630,6 +758,7 @@ void CatchBlock::Publish()
   catch_debug.actual_height_m = driver_.height_m;
   catch_debug.faults = faults_ | driver_.FaultCode();
   catch_debug.state = static_cast<uint8_t>(state_);
+  catch_debug.reason = last_reject_;
   catch_debug.feedback_valid = driver_.feedback_valid ? 1 : 0;
   catch_debug.motor_enabled = driver_.Enabled() ? 1 : 0;
   catch_debug.pump_on = driver_.PumpPinLevel() ? 1 : 0;

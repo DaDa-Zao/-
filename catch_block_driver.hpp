@@ -5,56 +5,51 @@
 
 /**
  * @file catch_block_driver.hpp
- * @brief 取块机构的机构驱动层：一台带减速比的升降轴 + 两路继电器。
+ * @brief
  *
- * 层次关系（三层都叫 driver，容易混，这里一次写清）：
- *   CatchBlockDriver          机构轴：米 / 转子 rad / 两路继电器 / 零点 / 软限位
- *     └ MotorDJI              控制层：ADRC + 电流链路
- *         └ MotorDJI_Driver   CAN 收发：电流码
+ * 这层只干四件事：单位换算、硬件配置、采样、输出。
+ * 它不认识状态机，也不做安全策略 —— 那是 catch_block.hpp 的事。
  *
- * 本层只做四件事：单位换算、硬件配置、采样、执行器输出；不认识状态机，也不做安全策略。
- * 一旦本文件 include 了 catch_block.hpp，就说明有东西放错了层。
- *
- * 命名约定：公有采样量与诊断量沿用 MotorDJI 的做法直接公开（无下划线）供 Watch 展开；
- *           私有成员一律带下划线。公有量由 Sample() 每拍刷新，外部只读。
- *
- * 运行上下文：所有方法只在 App 任务（名义 5 ms）里调用，内部不加临界区。
+ * 运行上下文：所有方法只在 App 任务（4 ms 一拍）里调用，内部不加临界区。
  */
 
 // Keil 手动强制输出：写非 0 为开，写 0 为关。写 0 是"撤力/松开"，不是刹车。
-extern "C" volatile uint8_t catch_pump_on;      ///< @brief PE6 气泵：非 0 = 吸附
-extern "C" volatile uint8_t catch_valve_closed; ///< @brief PE12 电磁阀：非 0 = 夹爪闭合
-extern "C" volatile uint8_t catch_motor_enable; ///< @brief 非 0 = 允许输出，仍受业务层门控
+// 引脚按实际布线：PE6 = 电磁阀（夹爪），PE12 = 气泵（吸盘）。
+extern "C" volatile uint8_t catch_pump_on;      ///< @brief PE12 气泵：非 0 = 吸附
+extern "C" volatile uint8_t catch_valve_closed; ///< @brief PE6 电磁阀：非 0 = 夹爪闭合
+extern "C" volatile uint8_t catch_motor_enable; ///< @brief 非 0 = 允许输出，还要过业务层那一关
 
 class CatchBlockDriver
 {
 public:
   /**
-   * @brief Configure() 的三种结局
-   * @note 必须区分 Rejected 与 HardwareFault：前者只记一次拒绝，后者要锁存 Configuration 故障。
+   * @brief Configure() 的三种结果。
+   * @note 前两种必须分开：Rejected 只算这次没配成，HardwareFault 要报故障。
    */
   enum class ConfigResult : uint8_t
   {
-    Rejected,      ///< 前置条件不满足，未下发任何配置
-    Applied,       ///< 配置成功，可以标零
-    HardwareFault  ///< 前置通过但 Init / 反馈守卫 / 链式配置失败
+    Rejected,     ///< 前置条件不满足，什么都还没动
+    Applied,      ///< 配好了，下一步可以标零
+    HardwareFault ///< 前置过了，但初始化 / 反馈守卫 / 参数下发失败
   };
 
-  /** @name 一次性配置 */
+  /** @name 配置与标零 */
   /** @{ */
   /**
-   * @brief 初始化 CAN、反馈守卫与 ADRC 位置环
-   * @note 要求电机已禁用、两路 GPIO 有效、硬件参数合法、不换 ESC 编号；成功后仍不使能。
+   * @brief 把 CAN、反馈守卫、位置环按参数配好。
+   * @note 配好之后仍然不输出，要等上层使能。要求电机已经停下、两路 GPIO 有效。
    */
   ConfigResult Configure(const CatchBlockConfig &config);
+
   /**
-   * @brief 以当前静止位置为零点并设软限位
-   * @note 速度超过 settled_speed_m_s 时拒绝采零，避免把运动中的位置当原点。
+   * @brief 把现在的位置记成 0 m，并按行程划出运动范围。
+   * @note 机构还在动就不记，免得把半路的位置当成原点。
    */
   bool ArmAtCurrentPosition();
+
   /**
-   * @brief 丢弃零点与"已配置"标记
-   * @note 不清驱动故障码，那由 ResetFault() / ResetFeedbackReference() 分别负责。
+   * @brief 丢掉零点和"已配置"标记，回到不能动的状态。
+   * @note 不清故障码，那个由 ResetFault() 单独负责。
    */
   void ResetConfiguration();
   /** @} */
@@ -62,84 +57,88 @@ public:
   /** @name 采样与查询 */
   /** @{ */
   /**
-   * @brief 刷新下面所有公有采样量与诊断量
-   * @note 必须在健康判定与越界判定之前调用，否则检查会用上一拍的数据。
+   * @brief 把编码器、电流、温度读进下面的公有成员。
+   * @note 必须在健康判定和越界判定之前调用，否则检查用的是上一拍的数据。
    */
   void Sample();
-  bool Ready() const;                ///< @brief 参数与控制器已配置完成
-  bool OriginValid() const;          ///< @brief 零点已采，高度可换算
-  bool Healthy() const;              ///< @brief 数据与控制器健康，不代表机构有支承
-  bool Enabled() const;              ///< @brief 驱动是否正在输出
-  bool LastTransmitOk() const;       ///< @brief 上次 CAN 发送是否被邮箱接受
-  uint32_t FaultCode() const;        ///< @brief 驱动锁存的故障位
-  float TravelMetres() const;        ///< @brief 行程 (m)
-  float TravelMarginMetres() const;  ///< @brief 越界余量 (m)
+
+  bool Ready() const;               ///< @brief 参数和控制器配好了没有
+  bool OriginValid() const;         ///< @brief 零点采了没有（采了才能把角度换成米）
+  bool Healthy() const;             ///< @brief 反馈和控制器有没有故障
+  bool Enabled() const;             ///< @brief 驱动现在是不是正在输出电流
+  bool LastTransmitOk() const;      ///< @brief 上次发 CAN 指令，邮箱收下了没有
+  uint32_t FaultCode() const;       ///< @brief 驱动自己锁存的故障位
+  float TravelMetres() const;       ///< @brief 行程多少米
+  float TravelMarginMetres() const; ///< @brief 越界判定在两端各放宽多少米
   /** @} */
 
-  /** @name 执行器输出 */
+  /** @name 输出 */
   /** @{ */
   /**
-   * @brief 两路继电器跟随标志位，并在 catch_motor_enable 为 0 时撤力
-   * @note 返回 false 表示上层不要再尝试使能，与拆分前的 return 时机一致。
+   * @brief 把两个继电器开关写到引脚上；顺带看总开关，为 0 就撤力。
+   * @note 继电器写在最前面，不受任何使能条件影响，方便单独做硬件通断测试。
+   *       返回 false 表示"这一拍别再去尝试使能了"。
    */
   bool ApplyManualOverrides();
+
   /**
-   * @brief 以当前位置为保持目标后使能
-   * @note 不会自动选目标，避免续用上一次运动的旧目标导致突然冲出去。
+   * @brief 以当前位置为保持目标，然后开始输出。
+   * @note 不会沿用上一次的目标，避免突然冲出去。
    */
   bool Enable();
-  void Disable();                        ///< @brief 幂等，重复调用无副作用
-  bool SetHeightTarget(float metres);    ///< @brief 米 → 转子目标角，含零点与范围检查
-  bool HoldHere();                       ///< @brief 把保持目标改成当前位置
-  void ResetFault();
-  void ResetFeedbackReference();
-  void Neutral();
-  void Uneutral();
+
+  void Disable();                     ///< @brief 停止输出。重复调用没关系
+  bool SetHeightTarget(float metres); ///< @brief 把"多少米"换成转子目标角下发；没标零或超行程会拒绝
+  bool HoldHere();                    ///< @brief 把保持目标改成当前位置，等于原地停住
+  void ResetFault();                  ///< @brief 清掉驱动锁存的故障位
+  void ResetFeedbackReference();      ///< @brief 重置反馈参考点，用来解掉跳变锁存
+  void Neutral();                     ///< @brief 退出闭环，不再控制
+  void Uneutral();                    ///< @brief 重新进入位置闭环
   /** @} */
 
   /** @name 标志位查询 */
   /** @{ */
-  bool MotorEnableRequested() const;  ///< @brief catch_motor_enable != 0
-  bool PumpRequested() const;         ///< @brief catch_pump_on != 0（意图，不是引脚电平）
-  bool ValveRequested() const;        ///< @brief catch_valve_closed != 0
-  bool PumpPinLevel() const;          ///< @brief 实际引脚电平，仅供诊断
-  bool ValvePinLevel() const;         ///< @brief 实际引脚电平，仅供诊断
+  bool MotorEnableRequested() const; ///< @brief Keil 那个总开关是不是被打开了
+  bool PumpRequested() const;        ///< @brief 气泵是不是被要求打开（是意图，不是引脚电平）
+  bool ValveRequested() const;       ///< @brief 夹爪是不是被要求闭合
+  bool PumpPinLevel() const;         ///< @brief PE12 现在实际是高还是低，只看不判断
+  bool ValvePinLevel() const;        ///< @brief PE6 现在实际是高还是低
   /** @} */
 
   /** @name 采样结果（Sample() 刷新，外部只读） */
   /** @{ */
-  float height_m = 0;        ///< @brief 相对原点的高度 (m)
-  float velocity_m_s = 0;    ///< @brief 高度方向速度 (m/s)
-  float rotor_rad = 0;       ///< @brief 实测转子累计角 (rad)
-  bool feedback_valid = false; ///< @brief 反馈已建立且无故障
+  float height_m = 0;          ///< @brief 相对原点的高度，m
+  float velocity_m_s = 0;      ///< @brief 高度方向的速度，m/s
+  float rotor_rad = 0;         ///< @brief 编码器累计的转子角度，rad
+  bool feedback_valid = false; ///< @brief 反馈建立了且没故障
   /** @} */
 
-  /** @name 控制器诊断（Sample() 刷新，外部只读） */
+  /** @name 控制器诊断（Sample() 刷新，外部只读，调 ADRC 时看这些） */
   /** @{ */
-  float target_position_rad = 0;       ///< @brief 位置环目标 (rad)
-  float measured_position_rad = 0;     ///< @brief 位置环反馈 (rad)
-  float reference_position_rad = 0;    ///< @brief TD 参考位置 v1 (rad)
-  float reference_velocity_rad_s = 0;  ///< @brief TD 参考速度 v2 (rad/s)
-  float eso_position_rad = 0;          ///< @brief ESO z1：估计位置 (rad)
-  float eso_velocity_rad_s = 0;        ///< @brief ESO z2：估计速度 (rad/s)
-  float disturbance_rad_s2 = 0;        ///< @brief ESO z3：估计总扰动加速度 (rad/s²)
-  float raw_current_A = 0;             ///< @brief ADRC 原始输出 (A)
-  float limited_current_A = 0;         ///< @brief 限幅后 (A)
-  float final_current_A = 0;           ///< @brief 量化后真正下发的物理电流 (A)
-  float accepted_command_A = 0;        ///< @brief CAN 邮箱已接受，不是实测电流
-  int16_t feedback_current_raw = 0;    ///< @brief 反馈原始电流码，未标定
-  bool feedback_current_valid = false; ///< @brief false 时 raw 不能当安培用
-  uint8_t temperature_C = 0;           ///< @brief 电调温度 (°C)
+  float target_position_rad = 0;       ///< @brief 位置环想要到达的角度，rad
+  float measured_position_rad = 0;     ///< @brief 编码器实测的角度，rad
+  float reference_position_rad = 0;    ///< @brief TD 平滑后的参考位置 v1，rad
+  float reference_velocity_rad_s = 0;  ///< @brief TD 平滑后的参考速度 v2，rad/s
+  float eso_position_rad = 0;          ///< @brief ESO 估的位置 z1，rad
+  float eso_velocity_rad_s = 0;        ///< @brief ESO 估的速度 z2，rad/s
+  float disturbance_rad_s2 = 0;        ///< @brief ESO 估的总扰动 z3，rad/s²
+  float raw_current_A = 0;             ///< @brief ADRC 算出来的原始电流，A
+  float limited_current_A = 0;         ///< @brief 限幅之后的电流，A
+  float final_current_A = 0;           ///< @brief 真正发出去的电流，A
+  float accepted_command_A = 0;        ///< @brief CAN 邮箱收下的电流，不等于电机真的出了这么多
+  int16_t feedback_current_raw = 0;    ///< @brief 电调回报的电流原始码，没标定
+  bool feedback_current_valid = false; ///< @brief false 时上面这个原始码不能当安培用
+  uint8_t temperature_C = 0;           ///< @brief 电调温度，°C
   /** @} */
 
 private:
-  MotorDJI motor_;  ///< @brief 电机控制层：驱动 + ADRC + 电流链路
-  BSP::GPIO::Inst pump_{Pin{'E', 6}};   ///< @brief PE6 气泵继电器
-  BSP::GPIO::Inst valve_{Pin{'E', 12}}; ///< @brief PE12 电磁阀继电器
+  MotorDJI motor_;                      ///< @brief 电机控制层：驱动 + ADRC + 电流链路
+  BSP::GPIO::Inst pump_{Pin{'E', 12}};  ///< @brief PE12 气泵继电器（吸盘，标签 XiPan）
+  BSP::GPIO::Inst valve_{Pin{'E', 6}};  ///< @brief PE6 电磁阀继电器（夹爪，标签 DianCiFa）
 
-  CatchBlockConfig config_;         ///< @brief 生效的硬件参数副本，只在 Configure() 赋值
-  float origin_rad_ = 0;            ///< @brief 零点转子角 (rad)
-  float metres_per_rotor_rad_ = 0;  ///< @brief 高度换算系数（约 2.6037 mm/rad），全工程只算这一处
-  bool configured_ = false;         ///< @brief 控制器已配置
-  bool origin_valid_ = false;       ///< @brief 零点有效
+  CatchBlockConfig config_;        ///< @brief 生效的硬件参数，只在 Configure() 里赋值
+  float origin_rad_ = 0;           ///< @brief 零点对应的转子角度，rad
+  float metres_per_rotor_rad_ = 0; ///< @brief 转子转 1 弧度走多少米，1:1 传动约 1.3019 mm/rad，全工程只算这一处
+  bool configured_ = false;        ///< @brief 控制器已配置
+  bool origin_valid_ = false;      ///< @brief 零点有效
 };

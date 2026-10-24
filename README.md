@@ -10,7 +10,7 @@
 |---|---|
 | `catch_block.hpp/.cpp` | 状态机、命令入口、故障策略、`catch_debug` 调试窗口 |
 | `catch_block_driver.hpp/.cpp` | 电机 + 两路继电器 + 零点 + 米↔弧度换算 |
-| `catch_block_config.hpp/.cpp` | 28 个可调参数与两段校验 |
+| `catch_block_config.hpp/.cpp` | 24 个可调参数与两段校验 |
 
 入口只有一个：`MainFrame.cpp` 里的 `System.RegistApp(CatchBlock::GetInstance());`
 
@@ -21,27 +21,31 @@
 调参前必须知道下面三个换算，否则看到 `rad` 不知道对应多少毫米：
 
 ```
-1 rad（转子）  = 0.025 × 2 ÷ 19.2032 = 2.6037 mm
-1 圈（转子）   = 6.2832 rad = 16.36 mm
-满行程 395 mm  = 151.7 rad
+1 rad（转子）  = 0.025 × 1 ÷ 19.2032 = 1.3019 mm    ← external_speed_ratio = 1.0
+1 圈（转子）   = 6.2832 rad = 8.18 mm
+满行程 395 mm  = 303.4 rad = 48.3 圈（转子）
 ```
+
+> 电机齿轮与带轮齿轮是 **1:1** 直连，所以转子转多少、带轮就转多少，中间只有 19.2032 的减速箱。
+> 之前是 2:1，同样行程只需要一半的转子转角；改成 1:1 之后**同样的机构速度需要两倍转速**。
 
 反过来，速度与转速的对照：
 
 | 机构速度 | 转子角速度 | 转子转速 |
 |---|---|---|
-| 10 mm/s | 3.84 rad/s | 36.7 rpm |
-| **20 mm/s**（默认规划速度） | 7.68 rad/s | 73.4 rpm |
-| **30 mm/s**（默认超速门限） | 11.52 rad/s | 110.0 rpm |
+| 10 mm/s | 7.68 rad/s | 73.4 rpm |
+| **20 mm/s**（默认规划速度） | 15.36 rad/s | 146.7 rpm |
+| **30 mm/s**（默认超速门限） | 23.04 rad/s | 220.1 rpm |
 
 静态承载电流（这是最容易踩的坑）：
 
 | 负载 | 理想电流 | 按 80% 效率 |
 |---|---|---|
-| 3.3 kg（带块） | 5.39 A | **6.74 A** |
-| 2.6 kg（卸块后） | 4.25 A | 5.31 A |
+| 3.3 kg（带块） | 2.70 A | **3.37 A** |
+| 2.6 kg（卸块后） | 2.13 A | 2.66 A |
 
-> **`max_current_A` 必须大于 6.8 A**，否则机构在顶端根本托不住。默认值 `0` 会被校验拒绝，这是有意的——逼你先算一遍。
+> **`max_current_A` 必须大于 3.4 A**，否则机构在顶端根本托不住。默认值 `0` 会被校验拒绝，这是有意的——逼你先算一遍。
+> 注意：1:1 直连后电机侧扭矩只有 2:1 时的一半，所以承载电流也减半（原来是 6.8 A）。
 
 ---
 
@@ -64,7 +68,7 @@
 
 | 路径 | 含义 |
 |---|---|
-| `catch_debug.config.<字段>` | 28 个参数，含义见第 6 节 |
+| `catch_debug.config.<字段>` | 24 个参数，含义见第 6 节 |
 | `catch_debug.command` | 命令号，写后下一拍自动清 0 |
 | `catch_debug.target_height_m` | 命令 3 的目标高度（米，0~0.395） |
 
@@ -72,13 +76,27 @@
 
 | 名字 | 含义 |
 |---|---|
-| `catch_pump_on` | 非 0 → PE6 输出高，气泵吸附 |
-| `catch_valve_closed` | 非 0 → PE12 输出高，夹爪闭合 |
+| `catch_pump_on` | 非 0 → **PE12** 输出高，气泵吸附（吸盘） |
+| `catch_valve_closed` | 非 0 → **PE6** 输出高，夹爪闭合（电磁阀） |
 | `catch_motor_enable` | 非 0 → 允许电机输出 |
 
 > `catch_motor_enable = 0` 是**撤力**，不是刹车。没有外部支承时不要靠它"停住"。
 
+**引脚分配**（按实际布线，与代码 `CatchBlockDriver` 成员一一对应）：
+
+| 引脚 | 执行器 | 高电平含义 | 对应标志 | CubeMX 标签 |
+|---|---|---|---|---|
+| **PE6** | 电磁阀（夹爪） | 夹爪闭合 | `catch_valve_closed` | `DianCiFa_Pin` |
+| **PE12** | 气泵（吸盘） | 吸附 | `catch_pump_on` | `XiPan_Pin` |
+
+> 引脚、标签、代码三者已对齐。注意代码用的是**裸引脚** `Pin{'E',6}` / `Pin{'E',12}`，
+> 不引用 `main.h` 里的宏——好处是 CubeMX 重命名标签时应用层不用跟着改，
+> 坏处是**改接线或改标签时编译器不会提醒你**，必须手动同步 `CatchBlockDriver` 的两个成员。
+> 两脚的电气配置完全相同（`OUTPUT_PP` + 下拉 + 高速，初值低），所以对调不产生任何副作用。
+
 ### 3.2 命令号
+
+**流程命令（1~6）** 会推动状态机，都有自己的前置条件：
 
 | 号 | 动作 | 前置条件 |
 |---|---|---|
@@ -89,20 +107,66 @@
 | 5 | 清故障、清反馈锁存、回到未配置 | 代码不设条件；操作前提是机构有支承（零点会丢） |
 | 6 | 软急停（保持式停车，不松力） | 电机已使能 |
 
+**单步动作（7~12）** 一次只做一件事，用来逐个验证执行器：
+
+| 号 | 动作 | 说明 |
+|---|---|---|
+| **7** | **开启气泵** | 写 `catch_pump_on = 1` → **PE12** 高。硬件直出，不看状态不看配置 |
+| **8** | **松开气泵** | 写 `catch_pump_on = 0` → **PE12** 低 |
+| **9** | **开启电磁阀** | 写 `catch_valve_closed = 1` → **PE6** 高，**夹爪闭合** |
+| **10** | **松开电磁阀** | 写 `catch_valve_closed = 0` → **PE6** 低，夹爪张开 |
+| **11** | **抬升** | 走到行程顶端 `travel_m`，状态 11(ManualMoving) → 12(ManualHold) |
+| **12** | **下降** | 走回原点 0 m，状态 11 → 12 |
+
+> 7~10 是纯开关量，**任何状态、包括未配置时都能用**——这正是你单独测继电器和气路要的。
+> 代价是：自动流程跑到一半时手动改这两路，会让 `SuctionOn` / `GripVerify` 的判据失效，
+> 该阶段会卡到 45 s 超时后转 `FaultHold`。所以 7~10 只在流程外或故障态用。
+
+> 11~12 是运动，必须先完成**配置(1) → 标零(2) → 使能(`catch_motor_enable=1`)** 三件事，
+> 否则一律返回 `result = 2`。没有零点的运动没有软限位，代码故意不放行。
+
+**自动流程（13~16）** 按工艺顺序推进状态机，两步之间夹着人工确认：
+
+| 号 | 动作 | 前置条件 | 推进到 |
+|---|---|---|---|
+| 13 | 进入夹取 | 状态 OriginHold 且已稳定 `settle_ms`、已使能 | GripClose → SuctionOn → GripVerify（自动） |
+| 14 | 确认夹牢并上升 | 状态 GripVerify、两路继电器已为高、已使能 | Lifting → TargetHold（自动） |
+| 15 | 许可投放 | 状态 TargetHold 且已稳定 | ReleaseReady → Release（自动） |
+| 16 | 确认物块离开并回程 | 状态 Release 且已过 `relay_dwell_ms` | Descending → OriginHold（自动） |
+
+> 注意：**状态机从不写两路继电器**，它只读 `catch_pump_on` / `catch_valve_closed` 作为判据。
+> 所以 13 之前你得自己把阀和泵打开（`command = 9` / `7`），14 之前它们必须仍然为高。
+> 投放同理：15 之后由你 `command = 8` / `10` 松开，再 `command = 16` 回程。
+
 `catch_debug.result` 回读执行结果：
 
 | 值 | 含义 |
 |---|---|
 | 0 | 还没执行 |
-| 1 | 已接受（**不代表动作成功**，要看 `state`） |
-| 2 | 被拒绝（条件不满足，看第 9 节） |
+| 1 | 已接受（7~12 表示"已执行"；1~6 与 13~16 会改状态，必须看 `state` 才算数） |
+| 2 | 被拒绝 |
 | 3 | 执行后处于故障态 |
+
+`result = 2` 时再读 `catch_debug.reason` 就知道该改哪里，不用回来翻代码：
+
+| reason | 含义 | 该做什么 |
+|---|---|---|
+| 0 | 没被拒绝（或最近一条命令没被拒） | — |
+| 1 | 业务阈值不自洽 | 查 `overspeed > speed`、`tolerance < travel/10`、`settle_ms`/`phase_timeout_ms` 范围 |
+| 2 | 硬件参数非法 | 查 `esc_id` 1~8、两个 sign 是 ±1、J/Kt > 0、`controller_Hz < observer_Hz`、`max_current ≤ 20` |
+| 3 | 当前状态不接受这条命令 | 看 `state`，多半是顺序错了（比如没标零就去抬升） |
+| 4 | 目标高度非法 | `target_height_m` 是 NaN/Inf，或不在 `0..travel_m` |
+| 5 | 驱动未就绪 | 未使能（`catch_motor_enable = 0`）、反馈不健康、或机构还在动 |
+| 6 | 电机仍在使能 | 配置前要先撤力：`catch_motor_enable = 0` 等 `motor_enabled` 变 0 |
+
+> `reason` 的编号在删掉四个 `*_verified` 之后整体前移了一位，旧笔记里的 2/3/4 现在是 1/2/3。
 
 ### 3.3 可读
 
 | 路径 | 含义 |
 |---|---|
 | `catch_debug.state` | 状态号，见 3.4 |
+| `catch_debug.result` / `reason` | 上一条命令的结果 / 被拒的具体原因，见 3.2 |
 | `catch_debug.faults` | 应用故障 \| 驱动故障（位定义见 3.5，两套位有重叠） |
 | `catch_debug.actual_height_m` | 相对原点的高度（m） |
 | `catch_debug.feedback_valid` | 1 = 反馈有效 |
@@ -169,9 +233,13 @@
 ### 阶段 0：继电器通断（不需要配置）
 
 1. `catch_motor_enable = 0`
-2. `catch_pump_on = 1` → 听继电器"嗒"、看模块 LED、气泵出气
-3. `catch_pump_on = 0`，`catch_valve_closed = 1` → 夹爪动作
+2. `command = 7` → 气泵开；`command = 8` → 气泵关
+3. `command = 9` → 电磁阀开（夹爪闭合）；`command = 10` → 电磁阀关（夹爪张开）
 4. 同时观察 `catch_debug.pump_on` / `valve_closed` 是否跟随（读的是引脚实际电平）
+
+> 7~10 与直接写 `catch_pump_on` / `catch_valve_closed` 完全等价，两条路都能用；
+> 命令号的好处是不用在 Watch 里另找全局量。这两组都在 `ApplyManualOverrides()` 最前面执行，
+> 不受任何使能条件影响。
 
 不通过就别往下走：检查继电器是 5 V 还是 3.3 V 触发、是低电平有效还是高电平有效、接的是 NO 还是 NC。
 
@@ -179,7 +247,7 @@
 
 **前提：机构被支承或悬空，负载取下。**
 
-1. 填 `catch_debug.config`：`esc_id`、`lift_encoder_sign`、`current_encoder_sign`（先随便填 ±1）、四个 `*_verified` 设 1、`max_current_A = 8`、其余按第 6 节起始值。
+1. 填 `catch_debug.config`：`esc_id`、`lift_encoder_sign`、`current_encoder_sign`（先随便填 ±1）、`inertia_kg_m2 = 1.5e-5`、`torque_constant_Nm_A = 0.0156`、`max_current_A = 8`、`observer_Hz = 20`、`controller_Hz = 4`、`current_slew_A_s = 2000`，其余按第 6 节起始值。
 2. `command = 1` → 期望 `result = 1`、`state = 1`。
    - `result = 2`：参数没通过校验，逐项核对第 6 节的前置条件。
    - `result = 3`：`state` 会变 14，硬件初始化失败（多半是 `esc_id` 写错或 CAN 没通）。
@@ -200,11 +268,11 @@
 
 | 观测量 | 期望 | 说明 |
 |---|---|---|
-| `final_current_A` | 5.4 ~ 6.8 A | 静态托举电流；明显偏小说明 Kt 填大了 |
-| `disturbance_rad_s2`（z3） | 约 −2600 | 重力扰动的等效加速度；量级不对说明 `inertia_kg_m2` 或 `torque_constant_Nm_A` 错了 |
+| `final_current_A` | 2.7 ~ 3.4 A | 静态托举电流；明显偏小说明 Kt 填大了 |
+| `disturbance_rad_s2`（z3） | 约 −2700 | 重力扰动的等效加速度；量级不对说明 `inertia_kg_m2` 或 `torque_constant_Nm_A` 错了 |
 | `actual_height_m` | 稳定在 0.2 ±0.001 | 缓慢下沉说明电流不够 |
 
-4. 若托不住：先把 `max_current_A` 加到 9~10 A 试，仍然托不住就回头核对 `torque_constant_Nm_A`。
+4. 若托不住：先把 `max_current_A` 加到 4~5 A 试，仍然托不住就回头核对 `torque_constant_Nm_A`。
 5. 若抖动/啸叫：把 `current_slew_A_s` 从 2000 降到 800，再把 `controller_Hz` 从 4 降到 2.5。
 
 ### 阶段 3：速度与加速度规划
@@ -228,6 +296,67 @@
 
 `viscous_Nm_s_rad` 保持 0，让 ESO 自己吸收摩擦；只有在 z3 长期饱和时才考虑填一个正数。
 
+### 阶段 5：整循环单步验证（前面四阶段都通过之后）
+
+目标：不用写自动流程，一条命令一个动作，把整套取块动作走完一遍。**每一步都要停下来看回读量再走下一步。**
+
+| # | 你写的 | 期望回读 | 说明 |
+|---|---|---|---|
+| 0 | `catch_motor_enable = 0` | `motor_enabled = 0` | 上电先确认撤力 |
+| 1 | `command = 1` | `result = 1`、`state = 1` | 配置 |
+| 2 | `command = 2` | `state = 2` | 原点标零（机构此时应在原点、有支承） |
+| 3 | `command = 9` | `valve_closed = 1` | **开启电磁阀**：夹爪闭合，能听到/看到动作 |
+| 4 | `command = 7` | `pump_on = 1` | **开启气泵**：吸嘴负压建立 |
+| 5 | `catch_motor_enable = 1` | `motor_enabled = 1` | 允许电机出力（此时会托住当前位置） |
+| 6 | `command = 11` | `state` 11→12，`actual_height_m` → 0.395 | **抬升**：走完全程约 20 s |
+| 7 | `command = 8` | `pump_on = 0` | **松开气泵**：物块释放 |
+| 8 | `command = 10` | `valve_closed = 0` | **松开电磁阀**：夹爪张开 |
+| 9 | `command = 12` | `state` 11→12，`actual_height_m` → 0 | **下降**：受控回原点 |
+| 10 | `catch_motor_enable = 0` | `motor_enabled = 0` | 撤力收工 |
+
+每一步的停止判据：
+
+- **继电器步（3/4/7/8）**：`catch_debug.pump_on` / `valve_closed` 读的是**引脚实际电平**，
+  跟随了就说明 `HAL_GPIO_WritePin` 真的执行了。没跟随就是引脚或时钟问题。
+- **运动步（6/9）**：`state` 从 11(ManualMoving) 变 12(ManualHold) 即到位；
+  途中可以随时 `command = 4` 原地停住，或 `command = 6` 软急停。
+
+**这一步能不能通过，等于把"配置→标零→使能→抬升→释放→下降"整条链路验证完了。**
+之后接自动流程（命令 13~16）时，出问题就只需怀疑流程编排，不用怀疑执行器。
+
+> 常见卡点：第 6 步返回 `result = 2` 多半是第 5 步没真正使能（`motor_enabled` 还是 0）——
+> 先确认 `state` 是 2 而不是 13/14，看第 8 节的反馈锁存。
+
+### 阶段 6：自动流程（13~16）
+
+阶段 5 是"每个执行器单独点一次"，这一段是"让状态机自己带顺序走"，也是最终产品的行为。
+**状态机不会自己开关继电器**，所以人的动作夹在中间：
+
+| # | 你写的 | 上下文 | 期望 |
+|---|---|---|---|
+| 0 | `command = 5` → `1` → `2` → `catch_motor_enable = 1` | 机构在原点、有支承 | 把状态拉回 **2 = OriginHold** |
+| 1 | `command = 9`、`command = 7` | OriginHold | `valve_closed = 1`、`pump_on = 1` |
+| 2 | `command = 13` | 已使能且稳定 ≥ `settle_ms` | `state` 2→3→4→5（自动走过 GripClose / SuctionOn），停在 **5 = GripVerify** |
+| 3 | 眼看/手摸确认真夹牢了 | GripVerify | — |
+| 4 | `command = 14` | 两路继电器仍为高 | `state` 5→6→7，停在 **7 = TargetHold** |
+| 5 | `command = 15` | TargetHold 已稳定 | `state` 7→8→9，停在 **9 = Release** |
+| 6 | `command = 8`、`command = 10` | Release | `pump_on = 0`、`valve_closed = 0`，物块落下 |
+| 7 | `command = 16` | 已过 `relay_dwell_ms`(300 ms) | `state` 9→10→2，停在 **2 = OriginHold** |
+
+> 第 0 步为什么必须做：命令 13 要求状态**正好**是 OriginHold，而阶段 5 结束停在 ManualHold。
+> 代码里没有 "ManualHold → OriginHold" 的路径，`command = 5` 是唯一入口——它会撤力，
+> 所以这一步机构必须在原点且有支承（负载最好已卸）。
+
+三个必须人工介入的点，也是三个最容易忘的点：
+
+- **第 2 步之前**：泵阀必须已经打开。`SuctionOn → GripVerify` 的判据就是 `pump_on && valve_closed`，
+  没开就会卡在状态 4，45 s 后 `Timeout` → `FaultHold`。
+- **第 4 步之前**：泵阀必须**仍然**为高。中途掉一路，14 直接返回 2。
+- **第 5 步之后**：`PermitDrop` 只是进 `ReleaseReady`，真正进 `Release` 要下一拍复核
+  （健康 + 位置误差 < 容差 + 速度 < 门限）。复核不过会 `Fail(Controller, true)` 转 `FaultHold`。
+
+> 想从任何一步重来：`command = 5`（有支承）→ 重新 1、2、使能。`command = 6` 只是停车，不清故障。
+
 ---
 
 ## 6. 参数速查表
@@ -239,17 +368,29 @@
 | `esc_id` | — | 1 | C620 编号 1~8，反馈 ID = 0x200+id |
 | `lift_encoder_sign` | ±1 | ±1 | 高度上升时编码器累计值的方向 |
 | `current_encoder_sign` | ±1 | ±1 | 正电流让转子加速的方向 |
-| `inertia_kg_m2` | kg·m² | 3.2e-5 | 折算到转子轴的整机惯量 |
+| `inertia_kg_m2` | kg·m² | 1.5e-5 | 折算到转子轴的整机惯量（1:1 传动；2:1 时是 3.2e-5） |
 | `torque_constant_Nm_A` | N·m/A | 0.0156 | **转子域**，手册的 0.3 是输出轴值，要除以 19.2032 |
-| `max_current_A` | A | 8 | 必须 > 6.8 A 才托得住 3.3 kg；上限 20 A 被校验卡死 |
+| `max_current_A` | A | 8 | 必须 > 3.4 A 才托得住 3.3 kg；上限 20 A 被校验卡死 |
 | `current_slew_A_s` | A/s | 2000 | 太小托不住、太大冲击 |
 | `observer_Hz` | Hz | 20 | ESO 带宽 |
 | `controller_Hz` | Hz | 4 | 位置环带宽，须 < `observer_Hz` |
 
-### 6.2 四个闸门
+### 6.2 没有"签字位"，也没有默认值兜底
 
-`direction_verified`、`model_verified`、`current_limits_verified`、`motion_limits_verified`
-——四项全为 1 才允许配置。它们不是开关，是**你签字的记录**：没实测过就别置 1。
+早期版本有四个 `*_verified` 布尔量（方向/模型/限流/限速各一个），全置 1 才允许 `command = 1`。
+**已删除**，原因很实际：置 1 的人和验证的人是同一个，它挡不住"签了没验"，也记不住任何东西——
+唯一的效果是每次上电多点四下。
+
+真正的保护在另外两处，不需要你额外做什么：
+
+1. **`ValidateHardware()` 强制两个 sign 必须是 ±1**。填 0 或 2 直接 `reason = 2`，
+   所以"忘了填方向"这种情况配不通。
+2. **填 0 的字段一律被拒**。`inertia_kg_m2`、`torque_constant_Nm_A`、`max_current_A`、
+   `current_slew_A_s`、`observer_Hz`、`controller_Hz` 默认都是 0，配不通 —— 逼你先算一遍。
+
+至于"方向对不对"，只有走完 README 阶段 1 才能知道，任何布尔量都无法替你确认。
+删掉这四个字段之后，`reason` 的编号整体前移一位：**1 = 阈值不自洽，2 = 硬件参数非法**，
+不再有"没签字"这一档。
 
 ### 6.3 几何与规划
 
@@ -257,7 +398,7 @@
 |---|---|---|
 | `travel_m` | 0.395 | 原点至顶端 |
 | `pulley_radius_m` | 0.025 | 同步带轮有效节圆半径 |
-| `external_speed_ratio` | 2.0 | 带轮转速是减速箱输出的 2 倍 |
+| `external_speed_ratio` | 1.0 | 电机齿轮与带轮齿轮 1:1 直连；改回 2.0 会让所有换算变一半 |
 | `gearbox_ratio` | 3591/187 ≈ 19.2032 | M3508 减速比，不要改 |
 | `speed_m_s` / `acceleration_m_s2` / `overspeed_m_s` | 0.02 / 0.04 / 0.03 | 见阶段 3 |
 
@@ -303,10 +444,10 @@
 `ADRC::Reset()` 会把 z3 清零，而 z3 收敛需要约 `3/(2π·observer_Hz)`（20 Hz 下约 **24 ms**）。
 在这 24 ms 里控制器完全"不知道"有重力，输出只有位置误差项。
 
-**首次使能时机构会自由下坠：约 4.4 ms 后转子就到 110 rpm，帧级跳变检查锁存 `AngleJump`，反馈永久失效。**
-（4.4 ms 而不是 3 ms，是因为 `inertia_kg_m2` 里含折算负载，等效加速度约 6.9 m/s² 而非 9.8。）
+**首次使能时机构会自由下坠：约 8.3 ms 后转子就到 220 rpm，帧级跳变检查锁存 `AngleJump`，反馈永久失效。**
+（8.3 ms 而不是 4 ms，是因为 `inertia_kg_m2` 里含折算负载，等效加速度约 3.6 m/s² 而非 9.8。）
 
-> 危险的不是位移——自由下坠 4.4 ms 只走 **0.07 mm**，机械上几乎看不出来。
+> 危险的不是位移——自由下坠 8.3 ms 只走 **0.13 mm**，机械上几乎看不出来。
 > 危险的是**反馈被锁存**：`feedback_valid` 变 0 后整个闭环失效，只能 `command = 5` 复位。
 > 所以你会看到"刚使能，机构没动，但已经故障了"，这不是硬件坏了。
 
@@ -352,15 +493,17 @@
 
 | 现象 | 可能原因 | 处理 |
 |---|---|---|
-| `command = 1` 返回 2 | 有必填项为 0、符号不是 ±1、`controller_Hz ≥ observer_Hz`、`max_current_A > 20`、四个 verified 没置 1 | 逐项对照 6.1 / 6.2 |
+| `command = 1` 返回 2 | **先看 `catch_debug.reason`**：1=阈值不自洽 2=硬件参数非法 6=电机还在使能 | 按 `reason` 对照 3.2 的表，一步到位 |
 | `command = 1` 返回 3，state 变 14 | `esc_id` 错、CAN 未通、C620 未上电 | 查接线与编号；改完 `command = 5` 再试 |
-| `command = 2` 返回 2 | 状态不是 Idle（可能还在 Fault）、机构在动（速度超 `settled_speed_m_s`）、反馈不健康 | 先 `command = 5`，等机构静止 |
-| `command = 3` 返回 2 | 状态不是 OriginHold/ManualHold、未使能、目标超范围 | 先使能（`catch_motor_enable = 1`） |
+| `command = 2` 返回 2 | 状态不是 Idle（可能还在 Fault）、机构在动（速度超 `settled_speed_m_s`）、反馈不健康 | 看 `reason`：3=状态不对，5=没就绪。先 `command = 5`，等机构静止 |
+| `command = 3` 返回 2 | 状态不是 OriginHold/ManualHold、未使能、目标超范围 | 看 `reason`：3=状态 4=目标 5=未使能 |
 | 使能后立刻 state=13 或 14 | 重力前馈缺失导致超速锁存（8.1） | `command = 5`，改为有支承时使能 |
 | 高度一直不动，但电流很大 | 电机未使能 / 机械卡死 / `current_encoder_sign` 反 | 看 `motor_enabled` 与 `final_current_A` |
 | 高度读数跳变 | 编码器方向反、`lift_encoder_sign` 错、反馈锁存 | 查 `feedback_valid` 与 `faults` |
 | 走到一半报 Travel | 零点或换算系数错（正常路径碰不到越界） | 重新标零；核对 `pulley_radius_m`/`gearbox_ratio` |
-| 停在顶端后缓慢下沉 | `max_current_A` 不够 | 加到 9~10 A 再试 |
+| 停在顶端后缓慢下沉 | `max_current_A` 不够 | 加到 4~5 A 再试 |
+| `command = 11` / `12` 返回 2 | 未使能（`motor_enabled = 0`）、状态不是 2/12、或参数 `travel_m` 为 0 | `reason = 5` 就是没使能，`3` 是状态不对，`4` 是目标非法 |
+| `command = 7~10` 返回 1 但继电器不动 | `result` 只表示标志位写了，继电器没响说明是硬件侧 | 查 `pump_on`/`valve_closed` 回读、继电器触发电压、NO/NC 接法 |
 
 ---
 
@@ -368,11 +511,24 @@
 
 ```
 1. catch_motor_enable = 0
-2. 填 catch_debug.config（四个 verified = 1，max_current_A ≥ 7）
+2. 填 catch_debug.config（两个 sign 填 ±1，`max_current_A ≥ 4`）
 3. catch_debug.command = 1      → 期望 state = 1
 4. catch_debug.command = 2      → 期望 state = 2
 5. catch_motor_enable = 1       → 期望 motor_enabled = 1
 6. target_height_m = 0.01, command = 3  → 看方向对不对
 7. 方向对了：加负载，走到 0.2，读 final_current_A 与 disturbance_rad_s2
 8. 出错：catch_motor_enable = 0 → command = 5 → 改参数 → 回到第 3 步
+```
+
+六个动作的单步号，记这六个就够：
+
+```
+7 泵开    8 泵关    9 阀开(夹紧)    10 阀关(松开)    11 抬升到顶    12 下降回原点
+```
+
+自动流程的一条链（继电器要自己开关，状态机只读不写）：
+
+```
+9 → 7 → 13 → 14 → 15 → 8 → 10 → 16
+阀  泵   夹取  上升  许可  松泵 松阀  回程
 ```
