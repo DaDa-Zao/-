@@ -90,12 +90,18 @@ CatchBlockDriver::ConfigResult CatchBlockDriver::Configure(const CatchBlockConfi
 /**
  * @brief 把现在的位置记成 0 m，并按行程划出软限位。
  * @note 软限位挡不住失电下坠，只是让控制器别去撞两端。
+ *       三种失败分开返回，状态机据此报不同的 reason，调参时才分得清是 CAN 没通还是机构在晃。
  */
-bool CatchBlockDriver::ArmAtCurrentPosition()
+CatchBlockDriver::ArmResult CatchBlockDriver::ArmAtCurrentPosition()
 {
-  if (!configured_ || !motor_.Healthy())
+  if (!configured_)
   {
-    return false;
+    return ArmResult::NotConfigured;
+  }
+  // 不健康时不再往下算：速度和角度都不可信，采到的零点会是错的。
+  if (!motor_.Healthy())
+  {
+    return ArmResult::Unhealthy;
   }
 
   // 运动中标零会污染零点，要求高度方向速度低于到位门限。
@@ -104,7 +110,7 @@ bool CatchBlockDriver::ArmAtCurrentPosition()
       6.28318530718f / 60 * metres_per_rotor_rad_;
   if (measured_speed > config_.settled_speed_m_s)
   {
-    return false;
+    return ArmResult::Moving;
   }
 
   origin_rad_ = float(fb.measure.total_angle) * RadPerCount;
@@ -113,7 +119,7 @@ bool CatchBlockDriver::ArmAtCurrentPosition()
   motor_.PositionLimits(fminf(origin_rad_, end) - margin, fmaxf(origin_rad_, end) + margin);
   origin_valid_ = true;
   motor_.Uneutral(PosC);
-  return true;
+  return ArmResult::Ok;
 }
 
 /**
@@ -231,6 +237,16 @@ bool CatchBlockDriver::OriginValid() const
 bool CatchBlockDriver::Healthy() const
 {
   return motor_.Healthy();
+}
+
+uint32_t CatchBlockDriver::HealthTerms() const
+{
+  return motor_.HealthTerms();
+}
+
+bool CatchBlockDriver::FeedbackSeen() const
+{
+  return motor_.driver.GetFeedbackSnapshot().initialized;
 }
 
 bool CatchBlockDriver::Enabled() const

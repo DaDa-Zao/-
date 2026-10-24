@@ -12,6 +12,13 @@
 | `catch_block_driver.hpp/.cpp` | 电机 + 两路继电器 + 零点 + 米↔弧度换算 |
 | `catch_block_config.hpp/.cpp` | 24 个可调参数与两段校验 |
 
+配套文档：
+
+| 文件 | 作用 |
+|---|---|
+| `调参流程.md` | 一步步怎么做，每步的判据 |
+| **`状态位速查.md`** | **调试时查表用**：`command` / `result` / `reason` / `state` / `blockers` / `faults` 的每个取值 |
+
 入口只有一个：`MainFrame.cpp` 里的 `System.RegistApp(CatchBlock::GetInstance());`
 
 ---
@@ -156,10 +163,12 @@
 | 2 | 硬件参数非法 | 查 `esc_id` 1~8、两个 sign 是 ±1、J/Kt > 0、`controller_Hz < observer_Hz`、`max_current ≤ 20` |
 | 3 | 当前状态不接受这条命令 | 看 `state`，多半是顺序错了（比如没标零就去抬升） |
 | 4 | 目标高度非法 | `target_height_m` 是 NaN/Inf，或不在 `0..travel_m` |
-| 5 | 驱动未就绪 | 未使能（`catch_motor_enable = 0`）、反馈不健康、或机构还在动 |
+| 5 | 驱动未就绪 / 不健康 | 看 `catch_debug.blockers` 卡在哪一道（见 3.6） |
 | 6 | 电机仍在使能 | 配置前要先撤力：`catch_motor_enable = 0` 等 `motor_enabled` 变 0 |
+| 7 | 机构还在动 | 标零专用：高度方向速度还高于 `settled_speed_m_s`，等它停稳 |
 
 > `reason` 的编号在删掉四个 `*_verified` 之后整体前移了一位，旧笔记里的 2/3/4 现在是 1/2/3。
+> 后来又把标零的"机构还在动"从 5 里拆出来单独编成 7，0~6 没有变动。
 
 ### 3.3 可读
 
@@ -168,9 +177,10 @@
 | `catch_debug.state` | 状态号，见 3.4 |
 | `catch_debug.result` / `reason` | 上一条命令的结果 / 被拒的具体原因，见 3.2 |
 | `catch_debug.faults` | 应用故障 \| 驱动故障（位定义见 3.5，两套位有重叠） |
+| `catch_debug.blockers` | 使能不成立时挡在第几道，见 3.6。**单值，不做位运算** |
 | `catch_debug.actual_height_m` | 相对原点的高度（m） |
 | `catch_debug.feedback_valid` | 1 = 反馈有效 |
-| `catch_debug.motor_enabled` | 1 = 驱动正在输出 |
+| `catch_debug.motor_enabled` | 1 = 驱动正在输出。**只读**，改它会被 `Publish()` 每 4 ms 覆盖，开关是 `catch_motor_enable` |
 | `catch_debug.pump_on` / `valve_closed` | 两路引脚**实际**电平 |
 | `catch_debug.target_position_rad` / `measured_position_rad` | 目标 / 实测转子角 |
 | `catch_debug.reference_position_rad` / `reference_velocity_rad_s` | TD 参考轨迹（v1/v2） |
@@ -179,6 +189,11 @@
 | `catch_debug.accepted_command_A` | CAN 邮箱已接受，不是实测电流 |
 | `catch_debug.feedback_current_raw` / `feedback_current_A_valid` | 反馈电流原始码（未标定时不能当安培用） |
 | `catch_debug.temperature_C` | 电调温度 |
+
+> 整个结构里只有三类东西：**输入**（`command` / `target_height_m` / `config`，你写）、
+> **事实**（`state`、`faults`、`actual_height_m`…，硬件和状态机现在是什么样）、
+> **诊断**（`result` / `reason` / `blockers`，全部由事实推导，不存第二份）。
+> 想加字段先想清楚属于哪一类——不要出现第四类，也不要让两个字段说同一件事。
 
 ### 3.4 状态号对照
 
@@ -216,6 +231,63 @@
 | 128 | OperatorHold | — |
 
 判断方法：先看 `catch_debug.state`。处于 `Fault`/`FaultHold` 时多半是应用侧；`feedback_valid` 突然变 0 且 bit2/bit64 亮，多半是驱动侧的超速锁存（见 8.2）。
+
+### 3.6 为什么不使能（`blockers`）
+
+`motor_enabled` 是**结果**，`blockers` 是**原因**。它按"从最根上问起"的顺序重算，**第一个不成立的
+阶段**就写进去并立即 return，所以跨阶段绝不会叠加（你看不到 `4 | 8 = 12` 这种）；
+只有健康段内部，几条判据可以同时不过。
+
+| `blockers` | 卡在哪 | 处置 |
+|---|---|---|
+| **0** | 没卡住（正在出力，或正等下一拍） | 若 `motor_enabled` 仍为 0，查 `catch_motor_enable` |
+| **1** | 总开关 `catch_motor_enable` 是 0 | 检查是不是写到 `catch_debug.motor_enabled` 上了——那个只读 |
+| **2** | 参数或控制器没配好 | 先 `command = 1`，看 `result` / `reason` |
+| **16** | ADRC 控制器没建起来 | `command = 5` → `command = 1` 重来 |
+| **32** | 有锁存的软件故障 | 看 `faults`，`command = 5` 清 |
+| **64** | **一帧反馈都没收到** | CAN 没通：接线、120 Ω、电调编号、电调没上电 |
+| **128** | 收到过反馈，但判无效 | 没建立成功，或有帧级故障，先查线 |
+| **256** | 坏帧 / 角度跳变 / 间隔超时 / 累计角溢出 | 常和 128 一起出现（= 384），先查线 |
+| **512** | 反馈超时 | 最近 `feedback_timeout_us` 内没有新帧 |
+| **1024** | ADRC 内部参数无效 | 惯量 / Kt / 带宽 / 限流 填错 |
+| **2048** | 上次 CAN 发送没被邮箱接受 | 总线被占满或发送冲突 |
+| **4** | 还没标零 | 先 `command = 2`，它就是这步失败的 |
+| **8** | 当前状态不在出力白名单 | 看 `state`：0/1/13/14 都不允许出力 |
+
+> 排序是**因果顺序**，不是严重程度：`1 总开关 → 2 配置 → 16…2048 健康 → 4 零点 → 8 状态`。
+> 于是 `blockers = 8` 一定意味着前面全过了，只是这个状态不让出力；而 `blockers = 1` 说明连总开关
+> 都没开，后面的健康问题**这时根本看不出来**。先解决当前这个，再看下一个。
+
+**最常见的两个值是 `4` 和 `64`。** `blockers = 4` = 健康全过、只差标零；`blockers = 64` = 从烧录
+到现在一帧 C620 反馈都没进来，问题在 CAN，不在参数。后者 `command = 2` 会回 `reason = 5`，
+而 `command = 1` 照样回 `result = 1`——因为配置只校验软件参数，不等反馈。
+
+`Idle` 本身也不在出力白名单里，但它排在最后，前面的健康问题没排除时你根本看不到 `8`。
+
+> **`blockers ≥ 16` 就是健康段**，把它 `÷ 16` 读成 `MotorDJI::HealthBit`：16→1、32→2、64→4、
+> 128→8、256→16、512→32、1024→64、2048→128。这一段**会叠加**——几条健康判据可以同时不过，
+> 常见叠法是 `128 + 256 = 384`（反馈判无效，且帧里带故障位）、`16 + 32 = 48`（控制器没建好，
+> 且已有锁存故障）。**只有反馈那三态互斥**：64 只表示"一帧都没收到"、128 只表示"收到过但判无效"、
+> 512 只表示"帧有效但过期"，三者不会同时出现。
+> （旧固件这段是单独的 `health` 字段，现在并进 `blockers`；低 4 位留给开关/配置/零点/状态。）
+
+`blockers = 64` 时，用全局 `can_recv_times`（`bsp_can.cpp:241`，RX 中断里逐帧 +1，任何 ID 都算）
+判断帧到底有没有进 CPU。**先记住它的语义**：本工程的 CAN 过滤器是 `IDLIST` 精确匹配
+（`bsp_can.cpp:82`），只放行 `rx_id` 和列表第二项 `0x000`；而全工程只注册了 `0x201`
+（`MainFrame.cpp` 只有一个应用），所以能被收进来的帧实际上只有 `0x201`。
+
+- **它在涨（C620 是 1 kHz，约 +1000/s）** = `0x201` 已经进到 CPU 了。这时候 `blockers` 不该是 64；
+  如果仍是 64，问题在软件侧：复查 `esc_id` 是不是 1、有没有别的应用抢注了同一个 ID。
+- **它不动** = 一帧都没进来，**但两种原因在计数器上分不开**：物理层全断（C620 没上 24 V / 接反 /
+  缺 120 Ω / 没共地 / 收发器没使能），**或者 ID 不一致被硬件过滤器挡掉**（C620 拨码 ≠ `config.esc_id`）。
+  正因为分不开，先确认拨码和 `esc_id` 都是 1，再去查线——否则你会在接线上下半天功夫，
+  结果问题只是拨码。
+
+> 这一条曾经写反过：以为"计数器在涨但没有 `0x201`"是一种常见情况。不是——过滤是精确 ID 的，
+> 非 `0x201` 的帧根本进不来，计数器也就不会动。
+
+> 为了让这种"静默死等"暴露出来，`Idle` 状态下 2 s 内没收到任何反馈帧会直接报 `Feedback`
+> 故障（`faults` bit2，`state` 变 14）。见到这个不是代码出错，是 CAN 真的没通。
 
 ---
 

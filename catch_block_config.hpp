@@ -13,15 +13,15 @@ class CatchBlockConfig
 {
 public:
   uint8_t esc_id = 1;                      ///< @brief 电调编号 1~8，反馈 ID = 0x200 + 编号
-  int8_t lift_encoder_sign = 0;            ///< @brief 只能填 +1 或 -1：往上走时编码器读数往哪边变
-  int8_t current_encoder_sign = 0;         ///< @brief 只能填 +1 或 -1：给正电流时转子往哪边转
-  float inertia_kg_m2 = 0;                 ///< @brief 折算到电机转子上的整机惯量，kg·m²。1:1 传动约 1.5e-5
-  float torque_constant_Nm_A = 0;          ///< @brief 每安培出多少扭矩，N·m/A。要填转子值，手册 0.3 是输出轴值
+  int8_t lift_encoder_sign = 1;            ///< @brief 只能填 +1 或 -1：往上走时编码器读数往哪边变
+  int8_t current_encoder_sign = 1;         ///< @brief 只能填 +1 或 -1：给正电流时转子往哪边转
+  float inertia_kg_m2 = 1.5e-5;            ///< @brief 折算到电机转子上的整机惯量，kg·m²。1:1 传动约 1.5e-5
+  float torque_constant_Nm_A = 0.3;        ///< @brief 每安培出多少扭矩，N·m/A。要填转子值，手册 0.3 是输出轴值
   float viscous_Nm_s_rad = 0;              ///< @brief 粘性阻尼，N·m·s/rad。填 0 表示让 ESO 自己去估
-  float max_current_A = 0;                 ///< @brief 允许输出的最大电流，A。必须大于静态托举电流才托得住
-  float current_slew_A_s = 0;              ///< @brief 电流每秒最多涨多少 A。太小托不住，太大有冲击
-  float observer_Hz = 0;                   ///< @brief ESO 观测器带宽，Hz。必须大于 controller_Hz
-  float controller_Hz = 0;                 ///< @brief 位置环带宽，Hz
+  float max_current_A = 8;                 ///< @brief 允许输出的最大电流，A。必须大于静态托举电流才托得住
+  float current_slew_A_s = 2000;           ///< @brief 电流每秒最多涨多少 A。太小托不住，太大有冲击
+  float observer_Hz = 20;                  ///< @brief ESO 观测器带宽，Hz。必须大于 controller_Hz
+  float controller_Hz = 4;                 ///< @brief 位置环带宽，Hz
   float travel_m = 0.395f;                 ///< @brief 原点往上能走多远，m
   float pulley_radius_m = 0.025f;          ///< @brief 同步带轮有效半径，m
   float external_speed_ratio = 1.0f;       ///< @brief 电机齿轮与带轮齿轮的转速比，本项目 1:1 直连。改它所有换算都变

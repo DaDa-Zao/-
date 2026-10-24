@@ -519,9 +519,12 @@ bool CatchBlock::DoArmAtOrigin(uint32_t now_ms)
     Reject(ReasonState); // 必须先配置成功（state=Idle）才能标零
     return false;
   }
-  if (!driver_.ArmAtCurrentPosition())
+  const CatchBlockDriver::ArmResult arm = driver_.ArmAtCurrentPosition();
+  if (arm != CatchBlockDriver::ArmResult::Ok)
   {
-    Reject(ReasonNotReady); // 反馈不健康，或机构还在动（速度超门限）
+    // 三种失败分开报，调参时才能分清是 CAN 没通、状态不对，还是机构在晃。
+    Reject(arm == CatchBlockDriver::ArmResult::Unhealthy ? ReasonNotReady :
+        arm == CatchBlockDriver::ArmResult::Moving ? ReasonMoving : ReasonState);
     return false;
   }
 
@@ -572,6 +575,14 @@ void CatchBlock::Fail(uint32_t fault, bool can_hold, uint32_t now_ms)
  */
 void CatchBlock::Advance(uint64_t now_us, uint32_t now_ms)
 {
+  // 配好了却一帧反馈都没收到，说明 CAN 没通。2 s 后直接报故障：
+  // 否则状态机会一直停在 Idle，command = 2 只回一个"未就绪"，看不出根因。
+  if (state_ == State::Idle && !driver_.FeedbackSeen() && now_ms - phase_start_ms_ > 2000)
+  {
+    Fail(Feedback, false, now_ms);
+    return;
+  }
+
   // 两个"保持态"需要持续刷新到位计时，供后续命令判断。
   if (state_ == State::OriginHold)
   {
@@ -729,13 +740,48 @@ void CatchBlock::ApplyOutputs()
   // 驱动层已完成两路继电器写入，并在 catch_motor_enable 为 0 时撤力。
   if (!driver_.ApplyManualOverrides())
   {
+    blockers_ = BlockerMotorSwitch;
     return;
   }
-  if (driver_.Enabled() || !driver_.Ready() || !driver_.OriginValid() ||
-      !StateAllowsEnable() || !driver_.Healthy())
+
+  if (driver_.Enabled())
+  {
+    blockers_ = BlockerNone; // 已经在出力，不算被挡
+    return;
+  }
+
+  // 按"因果顺序"取第一条不满足的，所以永远只有一个答案，不用做位运算：
+  //   开关 → 配置 → 硬件（CAN/反馈/ADRC）→ 标零 → 状态
+  // 健康位放在标零前面，因为标零本身依赖反馈；CAN 没通时应该报 64，而不是报 4。
+  if (!driver_.Ready())
+  {
+    blockers_ = BlockerNotConfigured;
+  }
+  else
+  {
+    const uint32_t health = driver_.HealthTerms();
+    if (health != 0)
+    {
+      blockers_ = uint16_t(health << 4); // HealthBit × 16
+    }
+    else if (!driver_.OriginValid())
+    {
+      blockers_ = BlockerNoOrigin;
+    }
+    else if (!StateAllowsEnable())
+    {
+      blockers_ = BlockerState;
+    }
+    else
+    {
+      blockers_ = BlockerNone;
+    }
+  }
+  if (blockers_ != BlockerNone)
   {
     return;
   }
+
   if (driver_.Enable())
   {
     // 升降/手动位移途中重新使能，视为人工中断，转故障保持。
@@ -763,6 +809,7 @@ void CatchBlock::Publish()
   catch_debug.motor_enabled = driver_.Enabled() ? 1 : 0;
   catch_debug.pump_on = driver_.PumpPinLevel() ? 1 : 0;
   catch_debug.valve_closed = driver_.ValvePinLevel() ? 1 : 0;
+  catch_debug.blockers = blockers_;
 
   catch_debug.target_position_rad = driver_.target_position_rad;
   catch_debug.measured_position_rad = driver_.measured_position_rad;

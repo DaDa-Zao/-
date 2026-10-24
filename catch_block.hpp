@@ -32,18 +32,27 @@
 class CatchBlockDebug
 {
 public:
-  CatchBlockConfig config;              ///< @brief 命令 1 使用的参数面板，可在 Watch 里逐项填
-  volatile uint8_t command = 0;         ///< @brief 调试命令号 0~16，写后自动清 0
-  volatile uint8_t result = 0;          ///< @brief 上一条命令的结果：0 没执行 1 已接受 2 被拒 3 出故障
-  volatile uint8_t reason = 0;          ///< @brief result=2 的原因：0 无 1 阈值 2 硬件 3 状态 4 目标 5 未就绪 6 还在使能
-  volatile float target_height_m = 0;   ///< @brief 命令 3 要走到的高度 (m)
-  volatile float actual_height_m = 0;   ///< @brief 当前实际高度 (m)
-  volatile uint32_t faults = 0;         ///< @brief 应用故障 | 驱动故障
+  // 这里只有三类东西，加新字段前先想清楚属于哪一类——不要出现第四类：
+  //   ① 输入：只有 command / target_height_m / config 能写，其余全部每 4 ms 被 Publish() 覆盖
+  //   ② 事实：硬件和状态机"现在是什么样"，一个事实只写一处
+  //   ③ 诊断：把"为什么不"翻译成能直接看的数，全部由 ② 推导，不存第二份独立事实
+  CatchBlockConfig config;              ///< @brief ① 命令 1 使用的参数面板，可在 Watch 里逐项填
+  volatile uint8_t command = 0;         ///< @brief ① 调试命令号 0~16，写后自动清 0
+  volatile float target_height_m = 0;   ///< @brief ① 命令 3 要走到的高度 (m)
+
+  // ② 事实
   volatile uint8_t state = 0;           ///< @brief State 枚举值，顺序即数值
+  volatile uint32_t faults = 0;         ///< @brief 应用故障 | 驱动故障，锁存，只能 command = 5 清
+  volatile uint8_t motor_enabled = 0;   ///< @brief 1 = 驱动正在输出。只读，开关是 catch_motor_enable
   volatile uint8_t feedback_valid = 0;  ///< @brief 1 = 反馈有效
-  volatile uint8_t motor_enabled = 0;   ///< @brief 1 = 驱动正在输出
   volatile uint8_t pump_on = 0;         ///< @brief 1 = PE12 实际为高
   volatile uint8_t valve_closed = 0;    ///< @brief 1 = PE6 实际为高
+  volatile float actual_height_m = 0;   ///< @brief 当前实际高度 (m)
+
+  // ③ 诊断
+  volatile uint8_t result = 0;          ///< @brief 上一条命令的结果：0 没执行 1 已接受 2 被拒 3 出故障
+  volatile uint8_t reason = 0;          ///< @brief result=2 的原因：1 阈值 2 硬件 3 状态 4 目标 5 未就绪 6 还在使能 7 还在动
+  volatile uint16_t blockers = 0;       ///< @brief 现在为什么不能出力，0 = 可以。位定义见 CatchBlock::Blocker
 
   // 调参用的控制器观测量，与 CatchBlockDriver 的公有诊断量一一对应。
   volatile float target_position_rad = 0;      ///< @brief 位置环目标 (rad)
@@ -215,8 +224,30 @@ private:
     ReasonHardware,  ///< 硬件参数非法（编号/符号/惯量/带宽/限流/接线）
     ReasonState,     ///< 当前状态不接受这条命令
     ReasonTarget,    ///< 目标高度是 NaN/Inf 或超出 0..travel_m
-    ReasonNotReady,  ///< 未使能、反馈不健康、机构在动
-    ReasonEnabled    ///< 电机仍在输出，此命令要求先撤力（仅配置）
+    ReasonNotReady,  ///< 未使能、反馈不健康；具体哪条看 catch_debug.blockers
+    ReasonEnabled,   ///< 电机仍在输出，此命令要求先撤力（仅配置）
+    ReasonMoving     ///< 机构还在动，速度高于 settled_speed_m_s（标零专用）
+  };
+
+  // "现在为什么不能出力"。只用于调试窗口，不参与控制逻辑。
+  // 按因果顺序取第一条不满足的，所以它永远只有一个答案（健康位可能几位叠加）：
+  //   开关 1 → 配置 2 → 硬件 16~2048 → 标零 4 → 状态 8
+  // 健康位放在标零前面：标零本身依赖反馈，CAN 没通时该报 64，不该报 4。
+  enum Blocker : uint16_t
+  {
+    BlockerNone = 0,             ///< 可以出力，或者已经在出力
+    BlockerMotorSwitch = 1,      ///< catch_motor_enable 还是 0
+    BlockerNotConfigured = 2,    ///< 还没配置成功（command = 1）
+    BlockerNoOrigin = 4,         ///< 还没标零（command = 2）
+    BlockerState = 8,            ///< 当前状态不在出力白名单里
+    BlockerCtrlNotReady = 16,    ///< 控制器没配好（ADRC 参数没下发）
+    BlockerFaultLatched = 32,    ///< 有锁存的软件故障，看 faults
+    BlockerNoFeedback = 64,      ///< 一帧反馈都没收到：CAN 没通、编号不对、电调没上电
+    BlockerFeedbackInvalid = 128,///< 收到过反馈，但被判无效
+    BlockerFeedbackFault = 256,  ///< 坏帧 / 角度跳变 / 间隔超时 / 累计角溢出
+    BlockerFeedbackStale = 512,  ///< 最近 feedback_timeout_us 内没有新帧
+    BlockerAdrcInvalid = 1024,   ///< ADRC 内部参数无效（b0/带宽/限幅没配好）
+    BlockerTransmitFailed = 2048 ///< 上次 CAN 发送没被邮箱接受
   };
 
   CatchBlockDriver driver_; ///< @brief 机构驱动层：电机 + 两路继电器 + 零点 + 换算
@@ -233,6 +264,7 @@ private:
   uint32_t faults_ = 0;       ///< @brief 应用故障位
   uint32_t rejected_ = 0;     ///< @brief 被拒绝的命令数
   uint8_t last_reject_ = ReasonNone; ///< @brief 最近一次拒绝的原因，每条命令进来时先清零
+  uint16_t blockers_ = BlockerNone;  ///< @brief 本拍为什么不能出力，ApplyOutputs() 里重算
   uint32_t phase_start_ms_ = 0; ///< @brief 当前阶段起点
 
   uint64_t previous_tick_us_ = 0; ///< @brief 上一拍时刻

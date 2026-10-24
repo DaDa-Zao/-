@@ -33,6 +33,19 @@ public:
     HardwareFault ///< 前置过了，但初始化 / 反馈守卫 / 参数下发失败
   };
 
+  /**
+   * @brief ArmAtCurrentPosition() 的四种结果。
+   * @note 原来只返回 bool，三种失败在状态机里被压成同一个"未就绪"，
+   *       调参时看不出到底是 CAN 没通还是机构在晃，所以拆开。
+   */
+  enum class ArmResult : uint8_t
+  {
+    Ok,            ///< 零点采好了
+    NotConfigured, ///< 还没配置成功
+    Unhealthy,     ///< 反馈或控制器不健康，具体哪条看 HealthTerms()
+    Moving         ///< 机构还在动，速度高于 settled_speed_m_s
+  };
+
   /** @name 配置与标零 */
   /** @{ */
   /**
@@ -45,7 +58,7 @@ public:
    * @brief 把现在的位置记成 0 m，并按行程划出运动范围。
    * @note 机构还在动就不记，免得把半路的位置当成原点。
    */
-  bool ArmAtCurrentPosition();
+  ArmResult ArmAtCurrentPosition();
 
   /**
    * @brief 丢掉零点和"已配置"标记，回到不能动的状态。
@@ -65,6 +78,8 @@ public:
   bool Ready() const;               ///< @brief 参数和控制器配好了没有
   bool OriginValid() const;         ///< @brief 零点采了没有（采了才能把角度换成米）
   bool Healthy() const;             ///< @brief 反馈和控制器有没有故障
+  uint32_t HealthTerms() const;     ///< @brief Healthy() 没过的那几条，逐位；0 = 全过
+  bool FeedbackSeen() const;        ///< @brief 收到过反馈帧没有，false 就是 CAN 一帧都没进来
   bool Enabled() const;             ///< @brief 驱动现在是不是正在输出电流
   bool LastTransmitOk() const;      ///< @brief 上次发 CAN 指令，邮箱收下了没有
   uint32_t FaultCode() const;       ///< @brief 驱动自己锁存的故障位
