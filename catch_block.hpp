@@ -42,9 +42,13 @@ public:
 
   // ② 事实
   volatile uint8_t state = 0;           ///< @brief State 枚举值，顺序即数值
-  volatile uint32_t faults = 0;         ///< @brief 应用故障 | 驱动故障，锁存，只能 command = 5 清
+  volatile uint32_t faults = 0;         ///< @brief 应用故障 | 驱动故障（两个位布局按位或），锁存，command 1/5 清。只看驱动层用下面的 motor_faults
+  volatile uint32_t motor_faults = 0;   ///< @brief 驱动层锁定故障原码（CatchBlockDriver::DriverFault）：1 配置 2 反馈非法 8 数值 64 超速，其余是保留位
   volatile uint8_t motor_enabled = 0;   ///< @brief 1 = 驱动正在输出。只读，开关是 catch_motor_enable
-  volatile uint8_t feedback_valid = 0;  ///< @brief 1 = 反馈有效
+  volatile uint8_t feedback_valid = 0;  ///< @brief 1 = 反馈过了库的初始化窗口，且没超过 feedback_timeout_us
+  volatile uint16_t feedback_age_ms = 0;      ///< @brief 距上一帧多少 ms；超过 config.feedback_timeout_us/1000 就判 Stale
+  volatile uint16_t feedback_age_peak_ms = 0; ///< @brief 自 command = 1 以来最长帧间隔，ms。用它判"到底断没断过帧"
+  volatile uint16_t feedback_hz = 0;          ///< @brief 库统计的反馈帧率，Hz。正常 1000；掉到几百说明丢帧或被别的报文挤占
   volatile uint8_t pump_on = 0;         ///< @brief 1 = PE12 实际为高
   volatile uint8_t valve_closed = 0;    ///< @brief 1 = PE6 实际为高
   volatile float actual_height_m = 0;   ///< @brief 当前实际高度 (m)
@@ -62,8 +66,8 @@ public:
   volatile float eso_position_rad = 0;         ///< @brief ESO z1 (rad)
   volatile float eso_velocity_rad_s = 0;       ///< @brief ESO z2 (rad/s)
   volatile float disturbance_rad_s2 = 0;       ///< @brief ESO z3 (rad/s²)
-  volatile float raw_current_A = 0;            ///< @brief ADRC 原始输出 (A)
-  volatile float limited_current_A = 0;        ///< @brief 限幅后 (A)
+  volatile float raw_current_A = 0;            ///< @brief ADRC 输出 (A)。库内已限幅，与下一项相同；撤力时为 0
+  volatile float limited_current_A = 0;        ///< @brief 限幅后 (A)。与上一项相同，撤力时为 0
   volatile float final_current_A = 0;          ///< @brief 真正下发的电流 (A)
   volatile float accepted_command_A = 0;       ///< @brief CAN 邮箱已接受，不是实测
   volatile int16_t feedback_current_raw = 0;   ///< @brief 反馈原始电流码，未标定
@@ -159,8 +163,9 @@ public:
    */
   bool SoftStop();
   /**
-   * @brief 清故障、清反馈参考，回到未配置。
-   * @note 要求机构有支承。这是唯一能清掉"反馈跳变"锁存的路径。
+   * @brief 清故障、回到未配置。
+   * @note 要求机构有支承。这是唯一能清掉驱动层锁存（超速）的路径；
+   *       反馈过期不需要它，帧回来自动就消。
    */
   bool ResetWhileSupported();
   /**
@@ -240,14 +245,14 @@ private:
     BlockerNotConfigured = 2,    ///< 还没配置成功（command = 1）
     BlockerNoOrigin = 4,         ///< 还没标零（command = 2）
     BlockerState = 8,            ///< 当前状态不在出力白名单里
-    BlockerCtrlNotReady = 16,    ///< 控制器没配好（ADRC 参数没下发）
-    BlockerFaultLatched = 32,    ///< 有锁存的软件故障，看 faults
+    BlockerCtrlNotReady = 16,    ///< 控制器没配好（config 没成，或 ADRC 没真正 Init）
+    BlockerFaultLatched = 32,    ///< 有锁存的软件故障，看 motor_faults（只有超速和配置失败会真的置位）
     BlockerNoFeedback = 64,      ///< 一帧反馈都没收到：CAN 没通、编号不对、电调没上电
-    BlockerFeedbackInvalid = 128,///< 收到过反馈，但被判无效
-    BlockerFeedbackFault = 256,  ///< 坏帧 / 角度跳变 / 间隔超时 / 累计角溢出
-    BlockerFeedbackStale = 512,  ///< 最近 feedback_timeout_us 内没有新帧
-    BlockerAdrcInvalid = 1024,   ///< ADRC 内部参数无效（b0/带宽/限幅没配好）
-    BlockerTransmitFailed = 2048 ///< 上次 CAN 发送没被邮箱接受
+    BlockerFeedbackInvalid = 128,///< 收到了帧，但还在库的 offset 初始化窗口里，累计角还没开始算
+    BlockerFeedbackFault = 256,  ///< 保留位，恒 0：回退后的库不再产生帧级故障码
+    BlockerFeedbackStale = 512,  ///< 最近 feedback_timeout_us 内没有新帧（**不锁存，帧回来自动消**）
+    BlockerAdrcInvalid = 1024,   ///< ADRC 内部参数无效（Init 没跑起来）
+    BlockerTransmitFailed = 2048 ///< 保留位，恒 0：BSP::CAN::Transmit 返回 void，发送结果不可观测
   };
 
   CatchBlockDriver driver_; ///< @brief 机构驱动层：电机 + 两路继电器 + 零点 + 换算

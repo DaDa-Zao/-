@@ -1,5 +1,4 @@
 #include "catch_block.hpp"
-#include "bsp_dwt.hpp"
 #include <cmath>
 
 // 全局唯一的调试窗口实例。上电全 0：气泵不吸、夹爪松开、电机不输出、没有待执行命令。
@@ -29,6 +28,10 @@ public:
 private:
   uint32_t mask_;
 };
+
+// 时间基准不在这里做了：单调微秒由 CatchBlockDriver 提供（见 AdvanceClock 的注释），
+// 因为帧年龄要它、周期检查也要它，两份时钟迟早对不上。这里只留一个 Publish/Enqueue
+// 用的短临界区。
 }
 
 /** @name 命令入口 */
@@ -292,23 +295,21 @@ void CatchBlock::Update()
   {
     return;
   }
-  uint64_t now_us;
-  {
-    Critical guard;
-    now_us = DWT_GetTimeline_USec();
-  }
-  const uint32_t now_ms = uint32_t(now_us / 1000);
-  // 首拍没有上一拍时间，用 5 ms 占位；只影响 2~15 ms 的窗口判断，不影响控制。
-  const uint64_t elapsed_us = previous_tick_us_ && now_us >= previous_tick_us_ ?
-      now_us - previous_tick_us_ : 5000;
-
   // 使能标志为 0 时立即撤力，不等状态机。
   if (!driver_.MotorEnableRequested() && driver_.Enabled())
   {
     driver_.Disable();
   }
 
+  // 采样顺带采集本拍的时间戳，之后所有判断都引用同一个数，不再各自读表。
+  // 时间基准是驱动层维护的单调微秒（CYCCNT 差值累加）：软件时间轴那套
+  // 秒/毫秒/微秒分开写、会被 CAN 接收中断拼坏的问题在这里不存在。
   driver_.Sample();
+  const uint64_t now_us = driver_.SampledUs();
+  const uint32_t now_ms = uint32_t(now_us / 1000);
+  // 首拍没有上一拍时间，用 5 ms 占位；只影响 2~15 ms 的窗口判断，不影响控制。
+  const uint64_t elapsed_us = previous_tick_us_ ? now_us - previous_tick_us_ : 5000;
+
   CheckMotion(now_us, now_ms, elapsed_us);
   previous_tick_us_ = now_us;
 
@@ -433,10 +434,13 @@ void CatchBlock::Process(Command command, const Config &config, float height_m, 
       manual_target_m_ = driver_.height_m;
       Transition(State::ManualHold, now_ms);
       return;
-    case Command::ResetWhileSupported: // 唯一能清反馈锁存的路径
+    case Command::ResetWhileSupported: // 撤力 + 清锁存 + 退回未配置
+      // 注意这条路径**不是**清锁存的唯一途径：撤力状态下 command = 1 也会经
+      // driver_.Configure() 里那行 faults_ = 0 清掉本层锁存，而且直接落到 Idle。
+      // 它唯一不可替代的作用是"带着使能也能退"——FaultHold 下电机还在托着，
+      // ApplyConfigure() 一进门就被 `driver_.Enabled()` 拒掉，只能先从这里撤力。
       driver_.Disable();
       driver_.Neutral();
-      driver_.ResetFeedbackReference();
       driver_.ResetFault();
       driver_.ResetConfiguration();
       protection_ack_ = false;
@@ -803,9 +807,13 @@ void CatchBlock::Publish()
   Critical guard;
   catch_debug.actual_height_m = driver_.height_m;
   catch_debug.faults = faults_ | driver_.FaultCode();
+  catch_debug.motor_faults = driver_.FaultCode();
+  catch_debug.feedback_hz = driver_.feedback_hz;
   catch_debug.state = static_cast<uint8_t>(state_);
   catch_debug.reason = last_reject_;
   catch_debug.feedback_valid = driver_.feedback_valid ? 1 : 0;
+  catch_debug.feedback_age_ms = uint16_t(driver_.feedback_age_ms > 60000 ? 60000 : driver_.feedback_age_ms);
+  catch_debug.feedback_age_peak_ms = uint16_t(driver_.feedback_age_peak_ms > 60000 ? 60000 : driver_.feedback_age_peak_ms);
   catch_debug.motor_enabled = driver_.Enabled() ? 1 : 0;
   catch_debug.pump_on = driver_.PumpPinLevel() ? 1 : 0;
   catch_debug.valve_closed = driver_.ValvePinLevel() ? 1 : 0;
