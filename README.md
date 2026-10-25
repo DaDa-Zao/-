@@ -141,13 +141,13 @@ Keil 里 Watch 输入 `catch_debug`，点左边 `+` 展开。
 | `pulley_radius_m` | 0.025 | 带轮节圆半径 |
 | `external_speed_ratio` | 1.0 | **1:1 直连，别填 2** |
 | `gearbox_ratio` | 19.2032 | 不要改 |
-| `speed_m_s` | 0.020 | 先用 20 mm/s 把流程走通 |
-| `acceleration_m_s2` | 0.040 | 三个速度参数必须一起改 |
-| `overspeed_m_s` | 0.030 | 取 `speed_m_s` 的 1.4~1.5 倍。贴着设一动就锁超速 |
+| `speed_m_s` | 0.25 | 台架已验：原点→最高点 1.7~2.0 s |
+| `acceleration_m_s2` | 0.60 | 三个速度参数必须一起改 |
+| `overspeed_m_s` | 0.38 | 取 `speed_m_s` 的 1.4~1.5 倍。贴着设一动就锁超速 |
 | `position_tolerance_m` | 0.001 | 1 mm 算到位 |
 | `settled_speed_m_s` | 0.001 | 1 mm/s 算停稳 |
 | `travel_fault_margin_m` | 0.005 | 软限位余量 |
-| `feedback_timeout_us` | 10000 | 多久没新帧判掉线，范围 2000~20000 |
+| `feedback_timeout_us` | 10000 | 多久没新帧判掉线。**别超过"最高速转半圈"的时间**：0.38 m/s 时半圈只有 10.76 ms，填 20000 就把掉线判定拖到断线后走 5 mm 才报 |
 | `settle_ms` | 500 | 稳住 0.5 s 才算到位 |
 | `relay_dwell_ms` | 300 | 继电器两次动作之间至少隔多久 |
 | `phase_timeout_ms` | 45000 | 单阶段超时，**等人确认也算在里面** |
