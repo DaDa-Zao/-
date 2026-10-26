@@ -97,7 +97,8 @@ Keil 里 Watch 输入 `catch_debug`，点左边 `+` 展开。
 | `blockers` | 此刻为什么不能出力，见 `状态位速查.md` §5 |
 | `faults` / `motor_faults` | 出过什么错，见 `状态位速查.md` §6 |
 | `actual_height_m` | 相对原点的高度，m |
-| `final_current_A` | 真正发出去的电流，A。静载托住 3.3 kg 时应该是 2.7~3.4 A |
+| `final_current_A` | 真正发出去的电流，A。静载托住两个物块时实测 **−3.16 A**（`lift_encoder_sign = -1` 下托举为负） |
+| `disturbance_rad_s2` | ESO 估的总扰动，rad/s²。同一工况实测 **+2952**。**它和 `final_current_A` 必须反号**，同号说明 `b0` 或接线反了 |
 | `feedback_valid` | 1 = 这份反馈可信。变 0 时高度冻结、使能被挡，**帧回来会自己恢复** |
 | `feedback_hz` | 反馈帧率，正常 C620 是 1000。掉到几百说明总线丢帧 |
 | `motor_enabled` | 1 = 正在输出。**只读**，开关是 `catch_motor_enable` |
@@ -115,7 +116,9 @@ Keil 里 Watch 输入 `catch_debug`，点左边 `+` 展开。
 | `reference_velocity_rad_s` 是方波 | `acceleration_m_s2` 太大，TD 没起平滑作用 |
 | `eso_velocity_rad_s` 长期滞后参考 | `observer_Hz` 偏低 |
 | `disturbance_rad_s2` 持续饱和（±几万） | `inertia_kg_m2` 或 `torque_constant_Nm_A` 错 |
-| `raw_current_A` 正常但 `final_current_A` 明显小 | 被 `max_current_A` 限住了 |
+| `raw_current_A` 贴着 ±`max_current_A`（±8 A） | ADRC 输出饱和：托不住，或位置环增益不够 |
+| `raw_current_A` 明显大于 `final_current_A` | 还在爬坡中（库内 1098.63 A/s），瞬态正常；稳态两者相等 |
+| `raw_current_A` 与 `limited_current_A` 永远相等 | **正常**。库在 `CalcPos()` 末尾就把 `i_des` 限幅了，本层再 clamp 一次是空操作 |
 | `measured_position_rad` 是负数 | **正常**。那是转子绝对累计角，可正可负，有意义的只有 `actual_height_m` |
 | `feedback_hz` 掉到 500 以下 | 总线丢帧。它同时是观测器的采样率，先修线再调参 |
 
