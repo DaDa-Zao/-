@@ -31,7 +31,7 @@ constexpr float kCodePerAmp = MotorDJI_Driver::MAX_CURRENT_CODE_C620 / kC620Full
  */
 constexpr uint32_t kOffsetInitFrames = 51u;
 
-/// @brief 超速要连判几拍才锁存。4 ms 一拍，3 拍 = 12 ms，滤掉单拍毛刺
+/// @brief 超速要连判几拍才锁存。5 ms 一拍，3 拍 = 15 ms，滤掉单拍毛刺
 constexpr uint32_t kOverspeedSamples = 3u;
 
 /**
@@ -364,7 +364,7 @@ void CatchBlockDriver::Sample()
   //
   // ① 命令链出现 NaN / Inf：ADRC 算出 NaN 会一路走到 `(int16_t)targ_current`，
   //    转成什么值由编译器决定，等于往电调里发随机电流。targ_current / targ_pos_rad 都是公开量，
-  //    直接查。只能晚一拍（4 ms）发现，但发现就撤力，比放任它发下去强得多。
+  //    直接查。只能晚一拍（5 ms）发现，但发现就撤力，比放任它发下去强得多。
   // ② 编码器角度码必须是 13 位（0..8191）。超了说明这一帧根本不是合法电调反馈，
   //    而它会直接污染库里的 round_cnt / total_angle —— 累计角一旦跳，零点和行程全废。
   if (!std::isfinite(motor_.targ_current) || !std::isfinite(motor_.targ_pos_rad))
@@ -486,7 +486,7 @@ bool CatchBlockDriver::ApplyManualOverrides()
  * @brief 以当前位置为保持目标，然后开始输出。
  * @note  库没有单独的 HoldHere()。Uneutral(PosC) 做的正是这件事：目标 = 当前累计角，
  *        同时清 PID、重置 TD/ESO，从当前位置无扰接管。
- *        已经使能时直接返回 —— 每 4 ms 重置一次控制器，误差永远建立不起来，等于没有闭环。
+ *        已经使能时直接返回 —— 每 5 ms 重置一次控制器，误差永远建立不起来，等于没有闭环。
  */
 bool CatchBlockDriver::Enable()
 {

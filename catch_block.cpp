@@ -103,7 +103,7 @@ bool CatchBlock::HoldHere()
 /** @{ */
 /**
  * @brief 两路继电器的单步动作
- * @note 只改标志位，真正写引脚在 ApplyManualOverrides()，所以最多晚一拍（≤4 ms）。
+ * @note 只改标志位，真正写引脚在 ApplyManualOverrides()，所以最多晚一拍（≤5 ms）。
  */
 void CatchBlock::SetPump(bool on)
 {
@@ -285,7 +285,7 @@ void CatchBlock::Start()
 }
 
 /**
- * @brief 框架 App 任务入口（4 ms 一拍，250 Hz）
+ * @brief 框架 App 任务入口（5 ms 一拍，200 Hz）
  * @note 顺序不能乱：先撤力与采样，再查故障，最后收命令、推状态、写输出。
  *       采样必须早于 CheckMotion，否则检查用的是上一拍的数据。
  */
@@ -704,7 +704,7 @@ void CatchBlock::CheckMotion(uint64_t now_us, uint32_t now_ms, uint64_t elapsed_
   {
     return;
   }
-  // 应用周期异常（实测 4 ms，允许 2~15 ms）；注意这里量的是 App 任务，不是控制环。
+  // 应用周期异常（名义 5 ms，允许 2~15 ms）；注意这里量的是 App 任务，不是控制环。
   // 在 Keil 里下断点就会超过 15 ms，所以使能状态下单步调试必掉故障，见 README。
   if (now_us < previous_tick_us_ || elapsed_us < 2000 || elapsed_us > 15000)
   {

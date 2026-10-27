@@ -8,7 +8,7 @@
  *
  * 分工：这一层只决定"什么时候做、做不到怎么办"，不碰寄存器也不认识 MotorDJI；
  *       所有硬件动作都调 CatchBlockDriver，对外单位一律是米 / 米每秒 / 毫秒。
- * 上下文：Update() 在 App 任务里跑（4 ms 一拍，250 Hz，见 RtosCpp.cpp），位置环在 Control 任务里跑（1 kHz）。
+ * 上下文：Update() 在 App 任务里跑（5 ms 一拍，200 Hz，见 RtosCpp.cpp），位置环在 Control 任务里跑（1 kHz）。
  * 安全边界：机构没有失电保持，也没有夹取/位置传感器。故障动作是"撤驱动"而不是
  *           "安全停止"，必须靠外部支承和防坠结构兜底。
  */
@@ -33,7 +33,7 @@ class CatchBlockDebug
 {
 public:
   // 这里只有三类东西，加新字段前先想清楚属于哪一类——不要出现第四类：
-  //   ① 输入：只有 command / target_height_m / config 能写，其余全部每 4 ms 被 Publish() 覆盖
+  //   ① 输入：只有 command / target_height_m / config 能写，其余全部每 5 ms 被 Publish() 覆盖
   //   ② 事实：硬件和状态机"现在是什么样"，一个事实只写一处
   //   ③ 诊断：把"为什么不"翻译成能直接看的数，全部由 ② 推导，不存第二份独立事实
   CatchBlockConfig config;              ///< @brief ① 命令 1 使用的参数面板，可在 Watch 里逐项填

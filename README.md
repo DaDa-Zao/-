@@ -25,6 +25,34 @@
 **分层规矩**：`Extensions70`（电机库、ADRC）和 `FrameComponets`（框架）**只读，一个字都不能改**，
 所有应用逻辑只在 `Users/` 里。库管算法和收发，驱动层管单位/采样/健康判据，状态机管流程。
 
+### 1.1 各任务跑多快（`RtosCpp.cpp`）
+
+| 任务 | 入口 | 写法 | 频率 | 跟本项目的关系 |
+|---|---|---|---|---|
+| Control | `ControlCpp()` | `osDelay(1)` | **1 kHz** | **唯一出力点**：ADRC 算电流、CAN 发帧 |
+| App | `ApplicationCpp()` | `osDelayUntil(5)` | **200 Hz（5 ms）** | `CatchBlock::Update()`、`Publish()` |
+| RobotSys | `RobotSystemCpp()` | `osDelayUntil(5)` | 200 Hz | DWT 维护、`System.Run()` |
+| StateCore | `StateCoreCpp()` | `osDelayUntil(4)` | 250 Hz | 本项目没用 |
+| SpiRead | `SpiReadCpp()` | `osDelayUntil(2)` | 500 Hz | 本项目没用 |
+| SpiConsume | `SpiConsumeCpp()` | 等信号量 | 事件驱动 | 本项目没用 |
+| CAN 接收 | `HAL_CAN_RxFifo0MsgPendingCallback` | 中断 | **1 kHz** | C620 主动上报，累加转子角度 |
+
+六个任务**全是 `osPriorityNormal`**，时间片轮转，没有实时优先级差别。
+
+> **`Update()` 确实是 200 Hz，已核对到底**：`ApplicationCpp()` 用 `osDelayUntil(5)` = 200 Hz；
+> `System::_Update_Applications()` 里还有一层 `CntFull()` 按 `prescaler` 预分频，
+> 但 `prescaler` 默认 1 且**全工程无人修改**，所以每个 App 拍都调 `Update()`。
+> `Extensions70/App_70/Verif/MotorDM_Test_Pzh.cpp:8` 的注释也写明"Update() 由框架固定为 200Hz（5ms/次）"。
+
+**这对判据意味着什么**：
+
+- `catch_debug` 所有字段**每 5 ms 才刷新一次**——Watch 里看到的最快变化就是 5 ms 一档
+- `now_us` 也是每 5 ms 更新一次（`AdvanceClock()` 在采样时走），
+  所以 `settle_ms`(500)、`relay_dwell_ms`(300)、`phase_timeout_ms`(45000) 的实际精度都是 **±5 ms**
+- 状态机对命令的响应延迟**最多 5 ms**（命令在邮箱里等下一拍）
+- `CheckMotion()` 那个 `2~15 ms` 的判据，就是在量 App 任务的实际抖动
+  （名义 5 ms，允许 2~15 ms 是因为 `osDelayUntil` 会被同优先级任务挤）
+
 ---
 
 ## 2. 先记住三个数
@@ -79,7 +107,7 @@
 Keil 里 Watch 输入 `catch_debug`，点左边 `+` 展开。
 
 **只有三个能写**：`config`（参数面板）、`command`（命令号）、`target_height_m`。
-其余全是只读，每 4 ms 被覆盖一遍。
+其余全是只读，每 5 ms 被覆盖一遍。
 
 另外三个独立开关（不在结构体里）：
 
@@ -140,22 +168,57 @@ Keil 里 Watch 输入 `catch_debug`，点左边 `+` 展开。
 | `current_slew_A_s` | 2000 | **当前不生效**，库把爬坡率写死成 1098.63 A/s |
 | `observer_Hz` | 50 | ESO 带宽 |
 | `controller_Hz` | 15 | 位置环带宽，必须 < `observer_Hz` |
-| `travel_m` | 0.395 | 量一下实际行程再填 |
+| `travel_m` | 0.435 | 量出来的实际行程再减 5 mm。现在离机械极限（约 455 mm）只剩 20 mm，别再加 |
 | `pulley_radius_m` | 0.025 | 带轮节圆半径 |
 | `external_speed_ratio` | 1.0 | **1:1 直连，别填 2** |
 | `gearbox_ratio` | 19.2032 | 不要改 |
-| `speed_m_s` | 0.25 | 台架已验：原点→最高点 1.7~2.0 s |
-| `acceleration_m_s2` | 0.60 | 三个速度参数必须一起改 |
-| `overspeed_m_s` | 0.38 | 取 `speed_m_s` 的 1.4~1.5 倍。贴着设一动就锁超速 |
+| `speed_m_s` | 0.35 | 台架已验：395 mm 行程约 1.4 s |
+| `acceleration_m_s2` | 1.00 | 三个速度参数必须一起改 |
+| `overspeed_m_s` | 0.52 | 取 `speed_m_s` 的 1.4~1.5 倍。贴着设一动就锁超速 |
 | `position_tolerance_m` | 0.001 | 1 mm 算到位 |
 | `settled_speed_m_s` | 0.001 | 1 mm/s 算停稳 |
 | `travel_fault_margin_m` | 0.005 | 软限位余量 |
-| `feedback_timeout_us` | 10000 | 多久没新帧判掉线。**别超过"最高速转半圈"的时间**：0.38 m/s 时半圈只有 10.76 ms，填 20000 就把掉线判定拖到断线后走 5 mm 才报 |
+| `feedback_timeout_us` | 7000 | 多久没新帧判掉线。**别超过"最高速转半圈"的时间**（`4090 / overspeed_m_s` µs）：0.52 m/s 时只有 7.87 ms，所以填 7000 |
 | `settle_ms` | 500 | 稳住 0.5 s 才算到位 |
 | `relay_dwell_ms` | 300 | 继电器两次动作之间至少隔多久 |
 | `phase_timeout_ms` | 45000 | 单阶段超时，**等人确认也算在里面** |
 
+> ⚠ **`travel_m = 0.435` 是补偿值，不是真实行程。**
+> 实测填 0.435 时机构正好走到 395 mm，说明 `metres_per_rotor_rad_` 偏大约 10%
+> （等效带轮有效半径 ≈ 22.7 mm，而 `pulley_radius_m` 填的是 25 mm）。
+> **不要按"真实行程 395 mm"把它改回 0.395** —— 那样只能走到 359 mm。
+>
+> 连带影响（都是这一个比例误差带来的）：
+> - `actual_height_m` 全程读数**偏大 10.1%**：显示 0.100 时实际在 0.0908
+> - `speed_m_s` / `overspeed_m_s` 同理偏大 → **超速门限实际偏松 10%**（0.52 对应真实 0.472 m/s）
+> - `travel_fault_margin_m` 的 5 mm 实际只有 **4.54 mm**，末端容差比看起来更紧
+> - `position_tolerance_m` 的 1 mm 实际是 0.91 mm
+>
+> 想彻底修对是改 `pulley_radius_m = 0.0227`（然后 `travel_m` 填 0.395），
+> 一次把整条米制换算拉正。但那是另一轮改动，会牵动零点和所有阈值，**目前按现状使用、别动**。
+
 > 怎么调快、四档参数、每档的验收判据，见 `调参流程.md` §2.5。
+
+### 5.1 两版实测对照：提速只改 4 个参数
+
+其余 20 个参数两版完全一致，**别一起动**。
+
+| 参数 | B 档（395 mm 行程 1.7~2.0 s） | C 档（当前，395 mm 行程 1.3~1.5 s） | 作用 |
+|---|---|---|---|
+| `speed_m_s` | 0.25 | **0.35** | TD 的速度上限，**提速的主要贡献** |
+| `acceleration_m_s2` | 0.60 | **1.00** | TD 的加速度上限，配套改 |
+| `overspeed_m_s` | 0.38 | **0.52** | 只用来算超速门限，取 `speed_m_s` 的 1.5 倍 |
+| `feedback_timeout_us` | 20000 | **7000** | 必须随速度降，否则断线后盲开距离过大 |
+
+> 表里两个时间都是 **395 mm 行程**下测的。行程改成现在的 `travel_m = 0.435` 之后两档都会变长：
+> B 档约 2.16 s、C 档约 1.59 s。**报速度时要说清行程**，否则数字对不上。
+
+**为什么 `feedback_timeout_us` 必须跟着降**：它不能超过"最高速下转子转半圈"的时间
+（`4090 / overspeed_m_s` µs）。B 档 10.76 ms、C 档 7.87 ms。超了这条线，
+断线后控制器还拿旧位置算，机构走多远才报出来就失控了。
+
+**回 B 档做对比测试**：只改回前三个，`feedback_timeout_us` 留 7000 也没问题
+（B 档半圈 10.76 ms > 7 ms，仍然安全）。
 
 ---
 
