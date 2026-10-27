@@ -1,4 +1,5 @@
 #include "catch_block.hpp"
+#include "keys.hpp"
 #include <cmath>
 
 // 全局唯一的调试窗口实例。上电全 0：气泵不吸、夹爪松开、电机不输出、没有待执行命令。
@@ -281,6 +282,7 @@ void CatchBlock::Start()
     return;
   }
   started_ = true;
+  PanelKeys::GetInstance().Init(); // 面板按键：只在上电配一次引脚
   Publish();
 }
 
@@ -295,6 +297,12 @@ void CatchBlock::Update()
   {
     return;
   }
+
+  // 面板按键先扫：它可能改 catch_motor_enable，必须早于下面那行"立即撤力"的判断，
+  // 否则按下失能键要等下一拍才生效。它也可能写 catch_debug.command，
+  // 走的是和 Keil 手写完全相同的 ConsumeDebugCommand() 路径。
+  PanelKeys::GetInstance().Update();
+
   // 使能标志为 0 时立即撤力，不等状态机。
   if (!driver_.MotorEnableRequested() && driver_.Enabled())
   {
@@ -817,6 +825,9 @@ void CatchBlock::Publish()
   catch_debug.motor_enabled = driver_.Enabled() ? 1 : 0;
   catch_debug.pump_on = driver_.PumpPinLevel() ? 1 : 0;
   catch_debug.valve_closed = driver_.ValvePinLevel() ? 1 : 0;
+  // 面板按键的两级证据：keys_raw 变了说明引脚识别到了，keys_last 变了说明动作真执行了。
+  catch_debug.keys_raw = PanelKeys::GetInstance().RawBitmap();
+  catch_debug.keys_last = PanelKeys::GetInstance().LastKey();
   catch_debug.blockers = blockers_;
 
   catch_debug.target_position_rad = driver_.target_position_rad;

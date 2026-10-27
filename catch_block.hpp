@@ -51,6 +51,9 @@ public:
   volatile uint16_t feedback_hz = 0;          ///< @brief 库统计的反馈帧率，Hz。正常 1000；掉到几百说明丢帧或被别的报文挤占
   volatile uint8_t pump_on = 0;         ///< @brief 1 = PE12 实际为高
   volatile uint8_t valve_closed = 0;    ///< @brief 1 = PE6 实际为高
+  // 面板按键的两级证据。按键"没反应"时先看这两个，能分开是接线/引脚问题还是被状态机拒了。
+  volatile uint16_t keys_raw = 0xFFFF;  ///< @brief 9 个键**消抖后**的电平位图，bit i = 1 表示第 i 个键松开。按下时对应位变 0
+  volatile uint8_t keys_last = 0xFF;    ///< @brief 最近一次**真正触发了动作**的键索引 0~8，0xFF = 从没触发过
   volatile float actual_height_m = 0;   ///< @brief 当前实际高度 (m)
 
   // ③ 诊断
